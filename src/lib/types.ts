@@ -88,6 +88,7 @@ export interface Draft {
   approvedHash: string | null;
   approvedAt: string | null;
   gmailDraftId: string | null;
+  gmailAccountEmail?: string;
   gmailRawHash: string | null;
   sentMessageId: string | null;
   threadId: string | null;
@@ -99,6 +100,10 @@ export interface Draft {
   jobUpdatedAt: string;
   createdAt: string;
   updatedAt: string;
+}
+export interface EnglishSuggestion {
+  body: string;
+  changes: string[];
 }
 export interface Settings {
   id: string;

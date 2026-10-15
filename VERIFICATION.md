@@ -1,3 +1,35 @@
+# PDF upload deployment fix — 2026-10-15
+
+The reported two-page PDF parses locally to 7,019 readable characters. Running the parser with only the upload route's traced deployment dependencies reproduced `ReferenceError: DOMMatrix is not defined`: `@napi-rs/canvas` was absent from the package.
+
+The upload path now initializes `pdf-parse/worker` before `pdf-parse`, supplies its canvas factory, and uses the embedded worker. Canvas is explicitly external in Next.js configuration. Initialization failures return a server error instead of suggesting that a valid résumé is unreadable; logs record the parsing stage and error type without résumé contents.
+
+- Production build and HTTP smoke passed with the user's exact PDF, including extracted text, encrypted storage, byte-for-byte download, and invalid-PDF rejection without replacing the previous résumé.
+- The same PDF parses successfully using only the new upload route's traced dependencies. `tests/pdf-deployment.ts` checks this packaging regression; ordinary full-node_modules tests would miss it.
+- All 47 automated tests passed. No production data was changed by these tests. The source changes still require deployment to Vercel.
+
+Run `npx tsx tests/http-smoke.ts` with isolated test services running. It uses a generated PDF fixture by default; optionally set `TEST_RESUME_PDF` to a local PDF path. Personal PDF contents are not included in the repository or test output.
+
+---
+
+# Neon and S3 migration verification — 2026-10-15
+
+The application now uses asynchronous Postgres persistence and encrypted private S3 object storage. Local configuration is `.env`; the former `.env.local` was preserved as `.env.local.unused-backup` so it cannot override `.env`. The requested online workspace starts fresh.
+
+- 42 automated tests passed against isolated PostgreSQL schemas and MinIO object prefixes. They cover existing behavior plus transaction rollback, concurrent owner creation, rate limits, task deduplication/claims, worker leases, storage failures, persistence, setup-token enforcement, cron authentication, and Vercel origin selection.
+- TypeScript and the production build passed. The HTTP smoke script builds in an isolated temporary directory and checks signup, login, workspace rendering, profile saves, CSV imports, encrypted résumé upload/download, background jobs, cron authentication, logout, and persistence after a server restart.
+- Browser verification signed into the isolated production app and opened the workspace with no console errors.
+- The configured Neon database schema was initialized successfully. Subsequent local connections experienced network timeouts; this environment's direct Neon connectivity is intermittent.
+- Created the configured `assets` bucket in Neon. Actual encrypted upload/download and presigned GET passed; unsigned reads returned 403. Verification objects were deleted.
+- The deployed `/login` now returns 200 and shows first-owner setup. A subsequent production signup-origin check returned 403 because the deployed application origin did not match the public site. The final source includes a tested Vercel-domain fallback, but that finishing change still requires deployment. Set production `APP_URL=https://job-assistant-nine.vercel.app` and ensure the required `.env.example` values, including `APP_SETUP_TOKEN`, are also present in Vercel.
+- No existing local workspace was migrated. No employer emails were sent, and no paid AI requests were made.
+
+Run `docker compose -f compose.test.yml up -d`, then `npm test` and `npx tsx tests/http-smoke.ts`. Tests do not use the production `.env`. Run `npm run cloud:check` separately to verify configured Neon services.
+
+---
+
+The earlier verification notes below describe the pre-migration version.
+
 # Verification — 15 October 2026
 
 The job-description guidance, local email generation, editable AI writing instructions, exports, and approval checks are implemented in the source code.

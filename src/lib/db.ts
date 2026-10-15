@@ -1,3 +1,4 @@
+import { attachDatabasePool } from "@vercel/functions";
 import { Pool as NeonPool, neonConfig } from "@neondatabase/serverless";
 import WebSocket from "ws";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -6,9 +7,14 @@ import { Pool, type QueryResultRow } from "pg";
 import { emptyProfile, defaultSettings, type Activity, type Task } from "./types";
 
 interface SqlConnection {
-  query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
+  query<T extends QueryResultRow = QueryResultRow>(
+    text: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[] }>;
 }
-interface SqlClient extends SqlConnection { release(): void; }
+interface SqlClient extends SqlConnection {
+  release(): void;
+}
 interface SqlPool extends SqlConnection {
   connect(): Promise<SqlClient>;
   end(): Promise<void>;
@@ -25,16 +31,19 @@ function connectionPool() {
     throw new Error("Set DATABASE_URL to your Neon Postgres connection string.");
   if (!pool) {
     const url = new URL(process.env.DATABASE_URL);
-    if (url.searchParams.get("sslmode") === "require") url.searchParams.set("sslmode", "verify-full");
+    if (url.searchParams.get("sslmode") === "require")
+      url.searchParams.set("sslmode", "verify-full");
     neonConfig.webSocketConstructor = WebSocket;
     const Driver = url.hostname.endsWith(".neon.tech") ? NeonPool : Pool;
-    pool = new Driver({
+    const created = new Driver({
       connectionString: url.toString(),
       max: 3,
       idleTimeoutMillis: 10000,
       connectionTimeoutMillis: 15000,
       allowExitOnIdle: true,
     });
+    if (process.env.VERCEL) attachDatabasePool(created);
+    pool = created;
     pool.on("error", () => console.error("[database] An idle connection failed."));
   }
   return pool;

@@ -607,7 +607,7 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
           </div>
           {!data.connections.openrouter && (
             <div className="notice small">
-              In your server’s .env.local, set <strong>OPENROUTER_API_KEY</strong> and{" "}
+              In your server’s .env, set <strong>OPENROUTER_API_KEY</strong> and{" "}
               <strong>OPENROUTER_MODEL</strong>, then restart. Keep the key private.
             </div>
           )}
@@ -644,6 +644,10 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
             Create actual Gmail drafts, send reviewed messages, and check replies in your
             application threads.
           </p>
+          <p className="small muted">
+            Connect one allowed account at a time. To switch, disconnect below, then choose another
+            allowed account when connecting. Your application history stays here.
+          </p>
           <div className="integration-details">
             <p>
               <Check size={15} /> Draft and send permission
@@ -655,7 +659,7 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
               <ShieldCheck size={15} /> Google tokens encrypted locally
             </p>
           </div>
-          {data.connections.gmail ? (
+          {data.connections.gmailEmail && (
             <>
               <div className="connected-account">
                 <Mail size={17} />
@@ -665,13 +669,15 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
                 Disconnect Gmail
               </Button>
             </>
-          ) : (
+          )}
+          {!data.connections.gmail && (
             <>
               {!data.connections.googleConfigured && (
                 <div className="notice small">
                   Set <strong>GOOGLE_CLIENT_ID</strong>, <strong>GOOGLE_CLIENT_SECRET</strong>, and{" "}
-                  <strong>GOOGLE_ALLOWED_EMAIL</strong> in .env.local. The README includes the
-                  Google Cloud setup.
+                  <strong>GOOGLE_ALLOWED_EMAIL</strong> in your server environment. The allowed
+                  emails can be a single address or a comma-separated list. See the README for local
+                  and Vercel setup.
                 </div>
               )}
               {data.connections.googleConfigured ? (

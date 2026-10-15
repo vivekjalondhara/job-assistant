@@ -1447,6 +1447,97 @@ td select {
   gap: 20px;
   align-items: start;
 }
+.email-folders {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.email-folders .tabs {
+  flex-wrap: wrap;
+}
+.email-folders .tabs span {
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.email-view-switch {
+  display: flex;
+  gap: 8px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.email-view-switch [aria-pressed="true"] {
+  background: #edf3e5;
+  color: var(--green);
+}
+.email-preview {
+  padding: 22px;
+  overflow-wrap: anywhere;
+}
+.email-preview h2 {
+  margin: 22px 0;
+  font-size: 20px;
+  line-height: 1.4;
+}
+.email-preview-details {
+  margin: 0;
+  font-size: 12px;
+}
+.email-preview-details > div {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.email-preview-details dt {
+  min-width: 36px;
+  color: #606958;
+}
+.email-preview-details dd {
+  margin: 0;
+}
+.email-preview-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.8;
+}
+.email-preview-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  margin: 24px 0 0;
+  font-size: 12px;
+}
+.english-suggestion {
+  border: 1px solid #bdcdb0;
+  border-radius: 10px;
+  padding: 18px;
+  margin-top: 18px;
+  background: white;
+}
+.english-suggestion h3 {
+  margin: 0 0 16px;
+  font-size: 15px;
+}
+.english-suggestion details {
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.english-suggestion summary {
+  cursor: pointer;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.english-suggestion ul {
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
 .email-list {
   border: 1px solid var(--line);
   border-radius: 12px;

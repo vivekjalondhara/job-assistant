@@ -24,7 +24,7 @@ import {
   CheckCheck,
   Clock3,
 } from "lucide-react";
-import type { AppState, Company, Job, Draft } from "@/lib/types";
+import type { AppState, Company, Job, Draft, EnglishSuggestion } from "@/lib/types";
 import { Badge, Button, Empty, External, Modal, relative, label, allowNavigation } from "./ui";
 import { ProfilePanel, SettingsPanel, CompanyForm, JobForm } from "./workspace-forms";
 import { EmailPanel } from "./email-panel";
@@ -36,6 +36,7 @@ export type Act = (
 ) => Promise<{
   message?: string;
   draftId?: string;
+  suggestion?: EnglishSuggestion;
   contacts?: { email: string; source: string; context: string }[];
 } | null>;
 type View = "overview" | "jobs" | "companies" | "emails" | "applications" | "profile" | "settings";

@@ -60,7 +60,8 @@ export async function runWorker(budgetMs = 200000) {
       const task = await claimTask();
       if (!task) break;
       try {
-        if (task.type === "scan") await scanCompany(task.targetId);
+        if (task.type === "scan")
+          await scanCompany(task.targetId, false, Math.min(deadline, Date.now() + 90000));
         else await syncReplies(deadline);
         await finishTask(task.id);
       } catch (error) {

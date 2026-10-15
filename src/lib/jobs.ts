@@ -74,7 +74,11 @@ type Listing = {
   publishedAt: string | null;
   salary: string;
 };
-export async function scanCompany(companyId: string, verifyBeforeSend = false) {
+export async function scanCompany(
+  companyId: string,
+  verifyBeforeSend = false,
+  deadline = Date.now() + 90000,
+) {
   const company = await get<Company>("company", companyId);
   if (!company || (company.paused && !verifyBeforeSend)) return;
   if (company.source === "manual") {
@@ -129,6 +133,11 @@ export async function scanCompany(companyId: string, verifyBeforeSend = false) {
     } else {
       let complete = false;
       for (let skip = 0; skip < 2000; skip += 100) {
+        if (Date.now() > deadline - 25000)
+          throw new AppError(
+            "The feed took too long to complete. Existing jobs were preserved. Try again.",
+            504,
+          );
         const batch = await fetchJson(
           `https://api.lever.co/v0/postings/${company.board}?mode=json&limit=100&skip=${skip}`,
         );

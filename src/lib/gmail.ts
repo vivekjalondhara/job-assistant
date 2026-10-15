@@ -7,6 +7,7 @@ import { exclusive } from "./ai";
 import { scanCompany } from "./jobs";
 import type { Draft, Job, Company } from "./types";
 import { contentChecks } from "./email-checks";
+import { allowedGoogleEmails, isAllowedGoogleEmail } from "./google-config";
 interface GmailConnection {
   email: string;
   accessToken: string;
@@ -19,7 +20,9 @@ export async function connection(): Promise<GmailConnection | null> {
   const record = await get<{
     value: string;
   }>("secret", "gmail");
-  return record ? decrypt<GmailConnection>(record.value) : null;
+  if (!record) return null;
+  const conn = decrypt<GmailConnection>(record.value);
+  return { ...conn, needsReconnect: conn.needsReconnect || !isAllowedGoogleEmail(conn.email) };
 }
 const saveConnection = async (value: GmailConnection) =>
   await put("secret", { id: "gmail", value: encrypt(value) });
@@ -27,13 +30,13 @@ export function googleConfigured() {
   return !!(
     process.env.GOOGLE_CLIENT_ID &&
     process.env.GOOGLE_CLIENT_SECRET &&
-    process.env.GOOGLE_ALLOWED_EMAIL
+    allowedGoogleEmails().length
   );
 }
 export function authorizationUrl(state: string) {
   if (!googleConfigured())
     throw new AppError(
-      "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_ALLOWED_EMAIL in .env first.",
+      "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_ALLOWED_EMAIL in your server environment. GOOGLE_ALLOWED_EMAIL accepts one email or a comma-separated list of valid addresses.",
       503,
     );
   const u = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -44,7 +47,7 @@ export function authorizationUrl(state: string) {
     scope:
       "openid email https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.readonly",
     access_type: "offline",
-    prompt: "consent",
+    prompt: "consent select_account",
     state,
   }).toString();
   return u.toString();
@@ -71,27 +74,41 @@ export async function exchangeCode(code: string) {
     issuer: ["https://accounts.google.com", "accounts.google.com"],
   });
   const email = String(payload.email || "").toLowerCase();
-  if (!payload.email_verified || email !== process.env.GOOGLE_ALLOWED_EMAIL?.toLowerCase())
-    throw new AppError("Connect the Google account configured as GOOGLE_ALLOWED_EMAIL.", 403);
+  if (payload.email_verified !== true || !isAllowedGoogleEmail(email))
+    throw new AppError("Choose a verified Google account listed in GOOGLE_ALLOWED_EMAIL.", 403);
   const scopes = String(data.scope || "");
   if (!scopes.includes("gmail.compose") || !scopes.includes("gmail.readonly"))
     throw new AppError("Grant both Gmail permissions to enable drafts and reply tracking.", 403);
-  const refreshToken = data.refresh_token || (await connection())?.refreshToken;
-  if (!refreshToken)
-    throw new AppError("Google did not grant offline access. Disconnect and reconnect Gmail.", 400);
-  await saveConnection({
-    email,
-    accessToken: data.access_token,
-    refreshToken,
-    expiresAt: Date.now() + data.expires_in * 1000,
-    needsReconnect: false,
+  await transaction(async () => {
+    const previous = await connection();
+    const refreshToken =
+      data.refresh_token ||
+      (previous?.email.toLowerCase() === email ? previous.refreshToken : undefined);
+    if (!refreshToken)
+      throw new AppError(
+        "Google did not grant offline access for this account. Connect again and grant consent.",
+        400,
+      );
+    if (previous) await bindLegacyDrafts(previous.email);
+    await saveConnection({
+      email,
+      accessToken: data.access_token,
+      refreshToken,
+      expiresAt: Date.now() + data.expires_in * 1000,
+      needsReconnect: false,
+    });
   });
   await activity("Gmail connected", email, "success");
 }
-async function accessToken() {
-  let conn = await connection();
+async function accessToken(expectedEmail: string) {
+  const conn = await connection();
   if (!conn || conn.needsReconnect)
     throw new AppError("Connect Gmail in Settings before continuing.", 409);
+  if (conn.email.toLowerCase() !== expectedEmail.toLowerCase())
+    throw new AppError(
+      "The connected Gmail account changed. Review the sender and try again.",
+      409,
+    );
   if (conn.expiresAt > Date.now() + 60000) return conn.accessToken;
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -106,23 +123,54 @@ async function accessToken() {
   });
   if (!response.ok) {
     if (response.status === 400 || response.status === 401)
-      await saveConnection({ ...conn, needsReconnect: true });
+      await updateConnectionIfCurrent(conn, { ...conn, needsReconnect: true });
     throw new AppError(
       "Gmail access could not be refreshed. Check Settings and reconnect if needed.",
       502,
     );
   }
   const data = await response.json();
-  conn = {
+  const refreshed = {
     ...conn,
     accessToken: data.access_token,
     expiresAt: Date.now() + data.expires_in * 1000,
   };
-  await saveConnection(conn);
-  return conn.accessToken;
+  await updateConnectionIfCurrent(conn, refreshed);
+  return refreshed.accessToken;
 }
-async function gmail(path: string, method = "GET", body?: unknown) {
-  const token = await accessToken();
+async function updateConnectionIfCurrent(previous: GmailConnection, next: GmailConnection) {
+  await transaction(async () => {
+    const current = await connection();
+    if (
+      current?.email === previous.email &&
+      current.accessToken === previous.accessToken &&
+      current.refreshToken === previous.refreshToken
+    )
+      await saveConnection(next);
+  });
+}
+async function bindLegacyDrafts(email: string) {
+  for (const draft of await all<Draft>("draft")) {
+    if (!draft.gmailAccountEmail && (draft.gmailDraftId || draft.sentMessageId || draft.threadId))
+      await put("draft", {
+        ...draft,
+        gmailAccountEmail: email.toLowerCase(),
+        approvedHash: null,
+        approvedAt: null,
+        status: draft.status === "approved" ? "gmail_draft" : draft.status,
+      });
+  }
+}
+async function gmail(expectedEmail: string, path: string, method = "GET", body?: unknown) {
+  const token = await accessToken(expectedEmail);
+  const current = await connection();
+  if (
+    !current ||
+    current.needsReconnect ||
+    current.email.toLowerCase() !== expectedEmail.toLowerCase() ||
+    current.accessToken !== token
+  )
+    throw new AppError("The Gmail connection changed. Review the sender and try again.", 409);
   const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
     method,
     signal: AbortSignal.timeout(25000),
@@ -132,7 +180,8 @@ async function gmail(path: string, method = "GET", body?: unknown) {
   if (!response.ok) {
     if (response.status === 401) {
       const conn = await connection();
-      if (conn) await saveConnection({ ...conn, needsReconnect: true });
+      if (conn?.email.toLowerCase() === expectedEmail.toLowerCase() && conn.accessToken === token)
+        await updateConnectionIfCurrent(conn, { ...conn, needsReconnect: true });
     }
     throw new AppError(
       `Gmail returned HTTP ${response.status}. ${response.status === 404 ? "The draft may have been sent or removed in Gmail." : "Check your connection and try again."}`,
@@ -143,6 +192,13 @@ async function gmail(path: string, method = "GET", body?: unknown) {
 }
 export async function disconnectGmail() {
   const conn = await connection();
+  await transaction(async () => {
+    const current = await connection();
+    if (current?.email !== conn?.email || current?.refreshToken !== conn?.refreshToken)
+      throw new AppError("The Gmail connection changed. Refresh Settings and try again.", 409);
+    if (current) await bindLegacyDrafts(current.email);
+    await remove("secret", "gmail");
+  });
   if (conn) {
     await fetch("https://oauth2.googleapis.com/revoke", {
       method: "POST",
@@ -151,7 +207,6 @@ export async function disconnectGmail() {
       signal: AbortSignal.timeout(15000),
     }).catch(() => null);
   }
-  await remove("secret", "gmail");
   await activity(
     "Gmail disconnected",
     "Local credentials removed. You can also revoke access in your Google Account.",
@@ -165,6 +220,7 @@ export const draftHash = (draft: Draft) =>
       body: draft.body,
       resumeId: draft.resumeId,
       resumeName: draft.resumeName,
+      gmailAccountEmail: draft.gmailAccountEmail,
       version: draft.version,
     }),
   );
@@ -173,6 +229,14 @@ export function validateDraft(draft: Draft) {
   if (issue) throw new AppError(issue.message);
 }
 async function checkCurrent(draft: Draft) {
+  const conn = await connection();
+  if (!conn || conn.needsReconnect)
+    throw new AppError("Connect Gmail in Settings before continuing.", 409);
+  if (draft.gmailAccountEmail !== conn.email.toLowerCase())
+    throw new AppError(
+      "Save this email to the connected Gmail account and approve it again before sending.",
+      409,
+    );
   const company = await get<Company>("company", draft.companyId);
   if (
     !company?.contactConfirmed ||
@@ -205,6 +269,11 @@ async function checkCurrent(draft: Draft) {
     const original = await get<Draft>("draft", draft.followUpOf);
     if (!original || original.replyStatus !== "none")
       throw new AppError("A reply or bounce was received. This follow-up must not be sent.", 409);
+    if (original.gmailAccountEmail !== draft.gmailAccountEmail)
+      throw new AppError(
+        "Connect the Gmail account that sent the original application before following up.",
+        409,
+      );
   }
 }
 export async function saveGmailDraft(draftId: string) {
@@ -218,7 +287,7 @@ export async function saveGmailDraft(draftId: string) {
       );
     validateDraft(draft);
     const conn = await connection();
-    if (!conn) throw new AppError("Connect Gmail in Settings.", 409);
+    if (!conn || conn.needsReconnect) throw new AppError("Connect Gmail in Settings.", 409);
     const attachment = draft.resumeId ? await readResume(draft.resumeId) : null;
     let replyHeaders: {
       inReplyTo?: string;
@@ -229,7 +298,13 @@ export async function saveGmailDraft(draftId: string) {
       const original = await get<Draft>("draft", draft.followUpOf);
       if (!original?.sentMessageId || !original.threadId)
         throw new AppError("The original sent message is not available for threading.");
+      if (original.gmailAccountEmail !== conn.email.toLowerCase())
+        throw new AppError(
+          "Connect the Gmail account that sent the original application before following up.",
+          409,
+        );
       const originalMessage = await gmail(
+        conn.email,
         `messages/${encodeURIComponent(original.sentMessageId)}?format=metadata&metadataHeaders=Message-ID`,
       );
       const messageId = (originalMessage.payload?.headers || []).find(
@@ -259,12 +334,15 @@ export async function saveGmailDraft(draftId: string) {
     });
     const mime = await composer.compile().build();
     const raw = mime.toString("base64url");
+    const existingId =
+      draft.gmailAccountEmail === conn.email.toLowerCase() ? draft.gmailDraftId : null;
     const result = await gmail(
-      draft.gmailDraftId ? `drafts/${encodeURIComponent(draft.gmailDraftId)}` : "drafts",
-      draft.gmailDraftId ? "PUT" : "POST",
+      conn.email,
+      existingId ? `drafts/${encodeURIComponent(existingId)}` : "drafts",
+      existingId ? "PUT" : "POST",
       { message: { raw, ...(threadId ? { threadId } : {}) } },
     );
-    const saved = await gmail(`drafts/${encodeURIComponent(result.id)}?format=raw`);
+    const saved = await gmail(conn.email, `drafts/${encodeURIComponent(result.id)}?format=raw`);
     const latest = (await get<Draft>("draft", draftId))!;
     if (latest.version !== draft.version)
       throw new AppError("The email changed while saving. Save the latest version again.", 409);
@@ -272,6 +350,7 @@ export async function saveGmailDraft(draftId: string) {
       ...latest,
       status: "gmail_draft",
       gmailDraftId: result.id,
+      gmailAccountEmail: conn.email.toLowerCase(),
       gmailRawHash: digest(saved.message.raw),
       approvedHash: null,
       approvedAt: null,
@@ -290,7 +369,10 @@ export async function approveDraft(draftId: string, version: number) {
       throw new AppError("Save the latest version to Gmail before approving.", 409);
     validateDraft(draft);
     await checkCurrent(draft);
-    const remote = await gmail(`drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`);
+    const remote = await gmail(
+      draft.gmailAccountEmail!,
+      `drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`,
+    );
     if (digest(remote.message.raw) !== draft.gmailRawHash)
       throw new AppError(
         "This draft was edited in Gmail. Review it there, or save your reviewed application version to Gmail again.",
@@ -327,7 +409,10 @@ export async function sendDraft(draftId: string) {
     if (draft.followUpOf) await syncReplies();
     validateDraft(draft);
     await checkCurrent(draft);
-    const remote = await gmail(`drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`);
+    const remote = await gmail(
+      draft.gmailAccountEmail!,
+      `drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`,
+    );
     if (digest(remote.message.raw) !== draft.gmailRawHash) {
       await put("draft", { ...draft, status: "gmail_draft", approvedHash: null, approvedAt: null });
       throw new AppError("The Gmail draft changed after approval. Review it again.", 409);
@@ -363,7 +448,9 @@ export async function sendDraft(draftId: string) {
       await put("draft", { ...latest, status: "sending", updatedAt: now() });
     });
     try {
-      const result = await gmail("drafts/send", "POST", { id: draft.gmailDraftId });
+      const result = await gmail(draft.gmailAccountEmail!, "drafts/send", "POST", {
+        id: draft.gmailDraftId,
+      });
       if (!result.id) throw new Error("Missing send result");
       await put("draft", {
         ...draft,
@@ -386,7 +473,9 @@ export async function sendDraft(draftId: string) {
 export async function syncReplies(deadline = Date.now() + 200000) {
   const conn = await connection();
   if (!conn || conn.needsReconnect) return;
-  const drafts = (await all<Draft>("draft")).filter((d) => d.status === "sent" && d.threadId);
+  const drafts = (await all<Draft>("draft")).filter(
+    (d) => d.status === "sent" && d.threadId && d.gmailAccountEmail === conn.email.toLowerCase(),
+  );
   let count = 0;
   const cursor = (await get<{ offset: number }>("schedule", "reply-cursor"))?.offset || 0;
   const ordered = [...drafts.slice(cursor), ...drafts.slice(0, cursor)];
@@ -396,6 +485,7 @@ export async function syncReplies(deadline = Date.now() + 200000) {
     // Advance only after a successful request; the next run resumes the rotation.
 
     const thread = await gmail(
+      conn.email,
       `threads/${encodeURIComponent(draft.threadId!)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted`,
     );
     await put("schedule", {

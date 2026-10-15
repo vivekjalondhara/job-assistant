@@ -2,12 +2,13 @@ import { z } from "zod";
 import { all, put, id, now, profile, settings, get, remove, transaction } from "./db";
 import { AppError, appUrl, privateHash } from "./security";
 import { emailOutputSchema, profileExtractionSchema } from "./validation";
-import type { Company, Job, Usage } from "./types";
+import type { Company, Draft, Job, Usage } from "./types";
 import {
   applicationEmailPrompt,
   jobMatchPrompt,
   profileExtractionPrompt,
   untrustedInputPrompt,
+  polishEmailPrompt,
 } from "./prompts";
 import { jobInsights } from "./job-insights";
 import { contentChecks } from "./email-checks";
@@ -19,7 +20,7 @@ export async function exclusive<T>(key: string, fn: () => Promise<T>): Promise<T
     }>("lock", key);
     if (lock && lock.expires > Date.now())
       throw new AppError("This action is already running. Please wait.", 409);
-    await put("lock", { id: key, owner, expires: Date.now() + 180000 });
+    await put("lock", { id: key, owner, expires: Date.now() + 600000 });
   });
   try {
     return await fn();
@@ -72,7 +73,7 @@ export async function generate<T>(
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
       "HTTP-Referer": appUrl(),
-      "X-OpenRouter-Title": "Folio — Private Job Assistant",
+      "X-OpenRouter-Title": "Folio - Private Job Assistant",
     },
     body: JSON.stringify({
       model,
@@ -218,6 +219,38 @@ export async function writeEmail(
     );
   return result;
 }
+export async function polishEmail(draft: Draft) {
+  const body = z.string().trim().min(20).max(8000).parse(draft.body);
+  const result = await generate(
+    "email_english",
+    z.object({
+      body: z.string().trim().min(20).max(8000),
+      changes: z.array(z.string().trim().min(1).max(250)).max(5),
+    }),
+    polishEmailPrompt,
+    { subject: draft.subject, body, purpose: draft.followUpOf ? "follow-up" : "application" },
+  );
+  // Language editing must not silently alter numerical facts or contact links.
+  // This is a narrow guard; the comparison UI still requires a factual review.
+  const protectedValues = (text: string) =>
+    (
+      text.match(/https?:\/\/[^\s<>]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|\d+(?:[.,]\d+)*/gi) ||
+      []
+    )
+      .map((value) => value.replace(/[.,;!?]+$/, ""))
+      .sort();
+  if (JSON.stringify(protectedValues(body)) !== JSON.stringify(protectedValues(result.value.body)))
+    throw new AppError(
+      "The suggestion changed numbers or contact links. Your original email was kept. Try again or edit it yourself.",
+      422,
+    );
+  const issue = contentChecks({ ...draft, to: "review@example.com", body: result.value.body }).find(
+    (check) => check.status === "error",
+  );
+  if (issue) throw new AppError(`The suggestion needs correction: ${issue.message}`, 422);
+  return result.value;
+}
+
 export async function analyzeJob(job: Job) {
   const p = await profile();
   if (!p.confirmed) throw new AppError("Confirm your profile first.");

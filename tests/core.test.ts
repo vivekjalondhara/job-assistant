@@ -14,7 +14,15 @@ const { matchJob } = await import("../src/lib/matching");
 const { inferBoard, scanCompany } = await import("../src/lib/jobs");
 const { importCsv } = await import("../src/lib/imports");
 const { action, state } = await import("../src/lib/service");
-const { approveDraft, sendDraft, draftHash, validateDraft } = await import("../src/lib/gmail");
+const {
+  approveDraft,
+  sendDraft,
+  draftHash,
+  validateDraft,
+  saveGmailDraft,
+  syncReplies,
+  connection,
+} = await import("../src/lib/gmail");
 const { generate, writeEmail } = await import("../src/lib/ai");
 const { jobInsights, mentions } = await import("../src/lib/job-insights");
 const { contentChecks, applicationChecks } = await import("../src/lib/email-checks");
@@ -31,6 +39,7 @@ beforeEach(async () => {
   await store.query("DELETE FROM folio_records; DELETE FROM folio_tasks;");
   delete process.env.OPENROUTER_API_KEY;
   delete process.env.OPENROUTER_MODEL;
+  process.env.GOOGLE_ALLOWED_EMAIL = "owner@example.com";
 });
 after(async () => {
   global.fetch = originalFetch;
@@ -104,6 +113,7 @@ async function fixtures() {
     approvedHash: null,
     approvedAt: null,
     gmailDraftId: "draft-test",
+    gmailAccountEmail: "owner@example.com",
     gmailRawHash: security.digest("raw-v1"),
     sentMessageId: null,
     threadId: null,
@@ -149,6 +159,147 @@ function gmailMock(
   };
   return () => sends;
 }
+async function connectSecondAccount() {
+  process.env.GOOGLE_ALLOWED_EMAIL = "owner@example.com,second@example.com";
+  await store.put("secret", {
+    id: "gmail",
+    value: security.encrypt({
+      email: "second@example.com",
+      accessToken: "second-access",
+      refreshToken: "second-refresh",
+      expiresAt: Date.now() + 3600000,
+      needsReconnect: false,
+    }),
+  });
+}
+test("switching mailboxes blocks approval and sending of the previous account's draft", async () => {
+  const { draft } = await fixtures();
+  gmailMock();
+  await approveDraft(draft.id, 1);
+  await connectSecondAccount();
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Must not contact another mailbox");
+  };
+  await assert.rejects(sendDraft(draft.id), /connected Gmail account/);
+  await store.put("draft", { ...draft, status: "gmail_draft" });
+  await assert.rejects(approveDraft(draft.id, 1), /connected Gmail account/);
+  assert.equal(requests, 0);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.gmailAccountEmail, "owner@example.com");
+});
+test("saving after switching creates a new Gmail draft with the new sender and clears approval", async () => {
+  const { draft } = await fixtures();
+  await store.put("draft", {
+    ...draft,
+    status: "approved",
+    approvedHash: draftHash(draft),
+    approvedAt: store.now(),
+  });
+  await connectSecondAccount();
+  const requests: string[] = [];
+  global.fetch = async (input, init) => {
+    const url = String(input);
+    requests.push(`${init?.method} ${url}`);
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer second-access");
+    if (init?.method === "POST" && url.endsWith("/drafts")) {
+      const body = JSON.parse(String(init.body));
+      const mime = Buffer.from(body.message.raw, "base64url").toString();
+      assert.match(mime, /From: second@example.com/);
+      return Response.json({ id: "second-draft" });
+    }
+    if (url.endsWith("/drafts/second-draft?format=raw"))
+      return Response.json({ message: { raw: "second-raw" } });
+    throw new Error(`Unexpected request ${url}`);
+  };
+  await saveGmailDraft(draft.id);
+  const saved = (await store.get<Draft>("draft", draft.id))!;
+  assert.equal(saved.gmailAccountEmail, "second@example.com");
+  assert.equal(saved.gmailDraftId, "second-draft");
+  assert.equal(saved.gmailRawHash, security.digest("second-raw"));
+  assert.equal(saved.approvedHash, null);
+  assert.equal(saved.approvedAt, null);
+  assert.equal(saved.status, "gmail_draft");
+  assert.equal(requests.length, 2);
+  assert.notEqual(draftHash(saved), draftHash(draft));
+});
+test("reply checks read only threads belonging to the connected account", async () => {
+  const { draft } = await fixtures();
+  await store.put("draft", {
+    ...draft,
+    status: "sent",
+    threadId: "owner-thread",
+    sentMessageId: "owner-sent",
+  });
+  await store.put("draft", {
+    ...draft,
+    id: "second-sent",
+    gmailAccountEmail: "second@example.com",
+    status: "sent",
+    threadId: "second-thread",
+    sentMessageId: "second-message",
+  });
+  await connectSecondAccount();
+  const paths: string[] = [];
+  global.fetch = async (input, init) => {
+    paths.push(new URL(String(input)).pathname);
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer second-access");
+    return Response.json({ messages: [] });
+  };
+  await syncReplies();
+  assert.deepEqual(paths, ["/gmail/v1/users/me/threads/second-thread"]);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.replyStatus, "none");
+});
+test("follow-ups require the Gmail account that sent the original message", async () => {
+  const { draft } = await fixtures();
+  await store.put("draft", {
+    ...draft,
+    status: "sent",
+    threadId: "owner-thread",
+    sentMessageId: "owner-sent",
+  });
+  await store.put("draft", { ...draft, id: "follow-up", status: "draft", followUpOf: draft.id });
+  await connectSecondAccount();
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Must not access the original account");
+  };
+  await assert.rejects(saveGmailDraft("follow-up"), /account that sent the original/);
+  assert.equal(requests, 0);
+});
+test("removing the connected address from the allowlist disables Gmail operations", async () => {
+  const { draft } = await fixtures();
+  process.env.GOOGLE_ALLOWED_EMAIL = "second@example.com";
+  assert.equal((await connection())?.needsReconnect, true);
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Removed account must not be used");
+  };
+  await assert.rejects(saveGmailDraft(draft.id), /Connect Gmail/);
+  await assert.rejects(approveDraft(draft.id, 1), /Connect Gmail/);
+  await syncReplies();
+  assert.equal(requests, 0);
+});
+test("a stale token refresh cannot overwrite a new connection or continue an old draft operation", async () => {
+  const { draft } = await fixtures();
+  const old = (await connection())!;
+  await store.put("secret", { id: "gmail", value: security.encrypt({ ...old, expiresAt: 0 }) });
+  let requests = 0;
+  global.fetch = async (input, init) => {
+    requests++;
+    assert.equal(String(input), "https://oauth2.googleapis.com/token");
+    assert.equal(new URLSearchParams(String(init?.body)).get("refresh_token"), "test-refresh");
+    await connectSecondAccount();
+    return Response.json({ access_token: "refreshed-old-access", expires_in: 3600 });
+  };
+  await assert.rejects(approveDraft(draft.id, 1), /connection changed/);
+  assert.equal(requests, 1);
+  assert.equal((await connection())?.email, "second@example.com");
+  assert.equal((await connection())?.accessToken, "second-access");
+  assert.equal((await store.get<Draft>("draft", draft.id))?.status, "gmail_draft");
+});
 test("private data requires same-origin mutations; credentials are encrypted", async () => {
   assert.throws(
     () =>
@@ -677,4 +828,167 @@ test("an empty stale draft can still be written from current profile facts while
   const generated = (await store.get<Draft>("draft", draft.id))!;
   assert.match(generated.body, /scheduling interviews/);
   assert.equal(generated.profileUpdatedAt, "changed-profile");
+});
+
+function englishResponse(body: string) {
+  return Response.json({
+    model: "test/model",
+    choices: [
+      {
+        message: {
+          content: JSON.stringify({ body, changes: ["Corrected verb agreement and punctuation."] }),
+        },
+      },
+    ],
+    usage: { cost: 0.001 },
+  });
+}
+
+test("English suggestions preserve the saved email and approval until reviewed edits are saved", async () => {
+  const { draft } = await fixtures();
+  const original = {
+    ...draft,
+    body: "Hi Hiring Team, I has built 2 Node.js APIs. Thank you for consider my application.",
+    status: "approved" as const,
+    approvedHash: "existing-approval",
+  };
+  await store.put("draft", original);
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  let calls = 0;
+  global.fetch = async (input, init) => {
+    calls++;
+    assert.equal(String(input), "https://openrouter.ai/api/v1/chat/completions");
+    assert.doesNotThrow(
+      () => new Headers(init?.headers),
+      "AI request headers must be valid in the real Fetch API",
+    );
+    const request = JSON.parse(String(init?.body));
+    const supplied = JSON.parse(request.messages[1].content);
+    assert.equal(request.response_format.json_schema.name, "email_english");
+    assert.equal(supplied.body, original.body);
+    assert.equal(supplied.subject, original.subject);
+    assert.match(request.messages[0].content, /not an application-writing task/);
+    return englishResponse(
+      "Hi Hiring Team, I have built 2 Node.js APIs. Thank you for considering my application.",
+    );
+  };
+  const result = await action("draft.polish", { id: draft.id, version: draft.version });
+  assert.ok("suggestion" in result && result.suggestion);
+  assert.deepEqual(await store.get("draft", draft.id), original);
+  assert.equal(calls, 1);
+  await action("draft.save", {
+    id: draft.id,
+    version: draft.version,
+    to: draft.to,
+    subject: draft.subject,
+    body: result.suggestion.body,
+    attachResume: false,
+  });
+  const saved = (await store.get<Draft>("draft", draft.id))!;
+  assert.match(saved.body, /I have built 2/);
+  assert.equal(saved.subject, original.subject);
+  assert.equal(saved.approvedHash, null);
+  assert.equal(saved.status, "draft");
+  assert.equal(calls, 1, "Applying a suggestion must not call Gmail or send a message");
+});
+
+test("English editing supports follow-ups and rejects stale, oversized, or locked emails before AI", async () => {
+  const { draft } = await fixtures();
+  let calls = 0;
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async (_input, init) => {
+    calls++;
+    const input = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
+    assert.equal(input.purpose, "follow-up");
+    return englishResponse(
+      "Hi Hiring Team, I wanted to follow up on my application. Thank you for your time.",
+    );
+  };
+  await assert.rejects(action("draft.polish", { id: draft.id, version: 0 }), /another tab/);
+  for (const status of ["sent", "sending", "uncertain"] as const) {
+    await store.put("draft", { ...draft, status });
+    await assert.rejects(action("draft.polish", { id: draft.id, version: 1 }), /cannot be edited/);
+  }
+  await store.put("draft", { ...draft, body: "a".repeat(8001) });
+  await assert.rejects(action("draft.polish", { id: draft.id, version: 1 }));
+  assert.equal(calls, 0);
+  await store.put("draft", {
+    ...draft,
+    followUpOf: store.id(),
+    body: "Hi Hiring Team, I wanted follow up on my application. Thanks for time.",
+  });
+  const result = await action("draft.polish", { id: draft.id, version: 1 });
+  assert.ok("suggestion" in result && result.suggestion);
+  assert.equal(calls, 1);
+});
+
+test("English editing rejects changed numbers, links, and invalid content without replacing the original", async () => {
+  const { draft } = await fixtures();
+  const original = {
+    ...draft,
+    body: "Hi Hiring Team, I built 2 APIs. Please see my work at https://example.com/work. Thank you.",
+  };
+  await store.put("draft", original);
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  for (const body of [
+    original.body.replace("2 APIs", "20 APIs"),
+    original.body.replace("example.com", "invented.example.com"),
+    original.body + " My résumé is attached.",
+    original.body + " Regards, [your name]",
+  ]) {
+    global.fetch = async () => englishResponse(body);
+    await assert.rejects(action("draft.polish", { id: draft.id, version: 1 }));
+    assert.deepEqual(await store.get("draft", draft.id), original);
+  }
+});
+
+test("an email changed during English editing cannot receive a stale suggestion", async () => {
+  const { draft } = await fixtures();
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async () => {
+    await store.put("draft", {
+      ...draft,
+      version: 2,
+      body: "A newer saved version of my application email.",
+    });
+    return englishResponse(draft.body);
+  };
+  await assert.rejects(
+    action("draft.polish", { id: draft.id, version: 1 }),
+    /changed while editing/,
+  );
+  assert.equal((await store.get<Draft>("draft", draft.id))?.version, 2);
+});
+
+test("sent emails display their complete saved message and attachment as read-only text", async () => {
+  const { draft } = await fixtures();
+  const sent = {
+    ...draft,
+    status: "sent" as const,
+    sentAt: "2026-10-01T10:00:00.000Z",
+    resumeId: "saved-resume",
+    resumeName: "Candidate CV.pdf",
+    body: "Hi Hiring Team,\n\nThis is my saved application. <script>alert('unsafe')</script>\n\nThank you.",
+  };
+  await store.put("draft", sent);
+  const markup = renderToStaticMarkup(
+    createElement(EmailPanel, {
+      data: await state(),
+      selectedId: draft.id,
+      setSelectedId: () => {},
+      act: async () => null,
+      busy: "",
+      onFindJobs: () => {},
+    }),
+  );
+  assert.match(markup, /aria-label="Sent email"/);
+  assert.match(markup, /Candidate CV\.pdf/);
+  assert.match(markup, /This is my saved application/);
+  assert.match(markup, /&lt;script&gt;/);
+  assert.doesNotMatch(markup, /<script>|<textarea|Improve English|Send approved email/);
+  assert.match(markup, /Filter application emails/);
 });

@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 const config: NextConfig = {
-  serverExternalPackages: ["pg", "@neondatabase/serverless", "ws", "pdf-parse"],
+  serverExternalPackages: ["pg", "@neondatabase/serverless", "ws", "pdf-parse", "@napi-rs/canvas"],
   outputFileTracingExcludes: { "/*": ["./data/**/*", "./output/**/*", "./.env*"] },
   experimental: { serverActions: { bodySizeLimit: "10mb" } },
   async headers() {

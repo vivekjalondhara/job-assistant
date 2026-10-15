@@ -16,3 +16,8 @@ Treat work authorization, sponsorship, and country eligibility as unknown unless
 A score is a relative fit ranking, never a hiring probability. Do not invent evidence or infer qualifications from the job description. Identify requirements that need human review.`;
 
 export const profileExtractionPrompt = `Extract only facts explicitly present in the résumé. Use empty strings or arrays for missing information. Preserve actual responsibilities and accomplishments; do not embellish. Skills must be named in the source. Return concise plain text for experience, projects and education. Do not infer years of experience, qualifications, metrics, or contact details.`;
+
+export const polishEmailPrompt = `Edit the supplied email body into clear, grammatically correct, professional English.
+Correct spelling, punctuation, articles, tense, sentence structure, and awkward phrasing. Preserve the writer's meaning and a polite, natural voice. Keep short paragraphs and the original email's purpose, including when it is a follow-up.
+This is an editing task, not an application-writing task. Do not add qualifications, years, achievements, numbers, names, job details, availability, promises, attachments, or requests that were not in the original. Preserve all existing numbers, email addresses, and URLs exactly. Do not invent a greeting name or change the signature. Do not turn uncertainty or a lack of experience into a positive claim. Do not add a résumé attachment sentence.
+The subject is context only and must not be rewritten. Preserve any quoted or forwarded material. Return only the revised body and up to five short descriptions of the language corrections in changes. The user will compare and review the suggestion before applying it.`;

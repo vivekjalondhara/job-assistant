@@ -41,7 +41,24 @@ export function decrypt<T>(value: string): T {
 export const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export const privateHash = (value: string) =>
   createHmac("sha256", secret()).update(value).digest("hex");
-export const appUrl = () => process.env.APP_URL || "http://localhost:3210";
+export function appUrl() {
+  const configured = process.env.APP_URL?.trim();
+  if (process.env.VERCEL === "1") {
+    // Local .env values must not send production sign-ins or OAuth back to localhost.
+    if (configured) {
+      const url = new URL(configured);
+      if (url.protocol === "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
+        return url.origin;
+    }
+    const host =
+      process.env.VERCEL_ENV === "production"
+        ? process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL
+        : process.env.VERCEL_URL;
+    if (!host) throw new Error("Set APP_URL to the public HTTPS application origin.");
+    return new URL(`https://${host}`).origin;
+  }
+  return new URL(configured || "http://localhost:3210").origin;
+}
 export async function isAuthenticated() {
   const token = (await cookies()).get("folio_session")?.value;
   if (!token) return false;

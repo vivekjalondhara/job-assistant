@@ -25,11 +25,11 @@ export async function importCsv(csv: string, includeJobs = false) {
     throw new AppError("Could not read this CSV. Include a header row and valid quoted cells.");
   }
   if (rows.length > 1000) throw new AppError("Import up to 1,000 rows at a time.");
-  const companies = await all<Company>("company"),
-    jobs = await all<Job>("job");
   let companyCount = 0,
     jobCount = 0;
   await transaction(async () => {
+    const companies = await all<Company>("company");
+    const jobs = await all<Job>("job");
     for (const original of rows) {
       const r = Object.fromEntries(
         Object.entries(original).map(([k, v]) => [k.toLowerCase().trim(), v]),

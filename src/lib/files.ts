@@ -17,11 +17,18 @@ export async function uploadResume(file: File) {
     throw new AppError("Use a PDF, DOCX, or plain text résumé.");
   const buffer = Buffer.from(await file.arrayBuffer());
   let text = "";
+  let stage = "validate";
   try {
     if (ext === ".pdf") {
       if (buffer.subarray(0, 4).toString() !== "%PDF") throw new Error("Invalid PDF");
+      stage = "pdf-initialize";
+      // Load Node canvas globals before PDF.js and embed the worker so serverless
+      // tracing cannot omit a worker file resolved dynamically at runtime.
+      const { CanvasFactory, getData } = await import("pdf-parse/worker");
       const { PDFParse } = await import("pdf-parse");
-      const parser = new PDFParse({ data: buffer });
+      PDFParse.setWorker(getData());
+      const parser = new PDFParse({ data: buffer, CanvasFactory });
+      stage = "pdf-extract";
       try {
         text = (await parser.getText()).text;
       } finally {
@@ -47,7 +54,20 @@ export async function uploadResume(file: File) {
     } else {
       text = buffer.toString("utf8");
     }
-  } catch {
+  } catch (error) {
+    // Do not log résumé contents, filenames, or raw parser messages.
+    console.error("resume_parse_failed", {
+      format: ext,
+      stage,
+      error: error instanceof Error ? error.name : "UnknownError",
+    });
+    if (stage === "pdf-initialize")
+      throw new AppError(
+        "PDF processing is temporarily unavailable. Try a DOCX or TXT résumé.",
+        503,
+      );
+    if (error instanceof Error && error.name === "PasswordException")
+      throw new AppError("This PDF is password-protected. Upload an unlocked copy.");
     throw new AppError("Could not read this résumé. Try a text-based PDF, DOCX, or TXT file.");
   }
   if (text.trim().length < 30)

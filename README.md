@@ -1,8 +1,8 @@
 # Folio — your private job assistant
 
-A working local application for organizing your job search: confirm your experience, import companies, find supported vacancies, review matches, write tailored emails with OpenRouter, save Gmail drafts, approve and send, and track replies.
+A private application for organizing your job search: confirm your experience, import companies, find supported vacancies, review matches, write tailored emails with OpenRouter, save Gmail drafts, approve and send, and track replies.
 
-Built for one person. The application and background worker run on your computer, with SQLite persistence. No external account or database is needed for the local workflow. OpenRouter and Gmail each require your own credentials.
+Built for one person. Records persist in Neon Postgres; encrypted résumé files persist in a private S3-compatible bucket, including Neon Object Storage. The web app runs on Vercel or locally. OpenRouter and Gmail each require your own credentials.
 
 ## Start the application
 
@@ -11,18 +11,35 @@ Use Node.js 22.16 or newer (tested on Node 22.23.1).
 ```bash
 cd /home/vivek-jalondhara/Documents/JOB/job-assistant
 npm ci
-cp .env.example .env.local
+cp .env.example .env
+npm run db:setup
+npm run cloud:check
 npm run build
 npm start
 ```
 
-If `.env.local` already exists, edit it instead of copying over it. Open **http://localhost:3210**, and create your private password (at least 12 characters). Use `localhost` consistently; requests from a different origin are rejected.
+If `.env` already exists, edit it instead of copying over it. Fill the required database, storage, encryption, setup-token, and cron values shown in `.env.example`. Use `.env` for configuration; remove or rename old override files so Next.js does not load stale values. Open **http://localhost:3210**, enter `APP_SETUP_TOKEN`, and choose your private password (at least 12 characters). Later logins use only the password. Use the origin in `APP_URL` consistently.
 
-For development, run `npm run dev` instead of the build/start commands. Both `dev` and `start` launch the web app and worker. Keep the terminal running; scheduled searches and reply checks run only while the worker is running. Ctrl+C stops both. The server binds to `127.0.0.1`.
+For development, run `npm run dev`. Local `dev` and `start` launch the web app and worker. The worker reads `.env`. On Vercel, authenticated actions and workspace polling run queued tasks with Next.js `after()`, and a protected cron route starts scheduled checks. Automatic sending is never enabled.
+
+## Deploy on Vercel with Neon
+
+1. Connect a Neon database and copy its pooled connection string into `DATABASE_URL`. Neon connections use the serverless WebSocket driver; ordinary Postgres connections use `pg`. Tables and indexes are initialized automatically, or explicitly with `npm run db:setup`.
+2. In the same Neon branch, create a **private** Object Storage bucket named `assets`. Copy `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` from Neon. Set `S3_BUCKET=assets`.
+3. Generate separate `APP_ENCRYPTION_KEY`, `APP_SETUP_TOKEN`, and `CRON_SECRET` values using `openssl rand -hex 32`. Keep the encryption key permanent. An existing configured key must not be replaced.
+4. Add these values in **Vercel → Project → Settings → Environment Variables**. Set `APP_URL=https://job-assistant-nine.vercel.app` for production. If it is missing or still points to localhost on Vercel, the app falls back to Vercel’s production-domain variable. The local `.env` is ignored by Git and excluded from the function bundle; it is not uploaded automatically.
+5. Add the optional OpenRouter and Google values if using those integrations. Set the Google callback to `https://job-assistant-nine.vercel.app/api/auth/google/callback`.
+6. Deploy the updated code. Visit `/login`, enter your setup token once, and choose a password. This prevents a stranger from claiming an empty private installation.
+
+`npm run cloud:check` verifies the database and performs an encrypted upload/download, a short-lived signed download, and an anonymous-access check. Its temporary object is deleted and its signed URL is never logged. Application downloads go through the authenticated résumé route, which decrypts the file.
+
+`vercel.json` schedules `/api/cron` daily at 06:00 UTC. While the workspace is open, its authenticated polling also processes queued jobs and schedules reply checks. For more frequent unattended checks, configure a schedule supported by your Vercel plan or an external scheduler that sends `Authorization: Bearer <CRON_SECRET>`. The worker uses a database lease, atomic task claims, and bounded execution. Large feeds can time out safely; existing listings are retained.
+
+Uploads are limited to **4 MB** to fit Vercel's request limit. The server encrypts résumé binaries before storing them. Database records, including extracted profile text, are stored in Postgres. Use a separate Neon branch and bucket credentials for preview deployments; previews should not share production data.
 
 ## Use it, one step at a time
 
-1. **My profile:** upload a PDF, DOCX, or TXT résumé (up to 8 MB). Fill your skills, experience, projects, target roles, location preferences, and signature. AI extraction is optional. Check the facts and confirm your profile. Image-only/scanned résumés need conversion to searchable text first.
+1. **My profile:** upload a PDF, DOCX, or TXT résumé (up to 4 MB). Fill your skills, experience, projects, target roles, location preferences, and signature. AI extraction is optional. Check the facts and confirm your profile. Image-only/scanned résumés need conversion to searchable text first.
 2. **Companies:** add companies manually or upload a CSV with **Import CSV**. Supported column names include `Company`, `Website`, `Careers URL`, `Recruitment email`, and `Contact source`. Importing does not verify an email address.
 3. **Find vacancies:** enter an official Ashby, Greenhouse, or Lever board URL and run a company check. Other careers sites support manual job entry. Daily scheduled checks can be enabled in Settings.
 4. **Review matches:** keyword scores work locally after profile confirmation. With OpenRouter configured, open a job and request AI analysis for reasons, gaps, and unknowns. Scores rank fit; they are not hiring probabilities.
@@ -35,7 +52,7 @@ For development, run `npm run dev` instead of the build/start commands. Both `de
 
 ## Connect OpenRouter
 
-Set these server-side values in `.env.local`, then restart both processes:
+Set these server-side values in `.env`, then restart both processes:
 
 ```dotenv
 OPENROUTER_API_KEY=your-key
@@ -55,25 +72,35 @@ The monthly setting stops new calls once recorded usage reaches the chosen amoun
 ## Connect Gmail
 
 1. Create a Google Cloud project and enable the **Gmail API**.
-2. Configure the OAuth consent screen for your personal application. Add your own Google account as a test user if the app is in Testing.
+2. Configure the OAuth consent screen for your personal application. If the app is in Testing, add **each account you want to connect** under **Google Auth Platform → Audience → Test users**.
 3. Create an OAuth client of type **Web application**.
-4. Register this exact authorized redirect URI:
+4. Register the exact authorized redirect URI for each environment you use:
 
    `http://localhost:3210/api/auth/google/callback`
 
-5. Set the following in `.env.local`:
+   `https://job-assistant-nine.vercel.app/api/auth/google/callback`
+
+5. Set the following in `.env` locally, or in **Vercel → Project → Settings → Environment Variables → Production** for the deployed app:
 
    ```dotenv
    GOOGLE_CLIENT_ID=your-client-id
    GOOGLE_CLIENT_SECRET=your-client-secret
-   GOOGLE_ALLOWED_EMAIL=your-own-gmail-address
+   GOOGLE_ALLOWED_EMAIL=first@gmail.com,second@gmail.com
    ```
 
-6. Restart the app and worker. Open **Settings → Connect Gmail**, choose the allowed account, and grant the requested permissions.
+   Replace the example addresses with your accounts. For just one account, use `GOOGLE_ALLOWED_EMAIL=first@gmail.com`. Keep the variable name singular even for multiple addresses. Use commas; spaces and letter case are ignored. Every entry must be a valid full email address. Wildcards and domain-only entries are rejected. The list controls Gmail connections, not the app's password login or separate user workspaces.
+
+   On Vercel, also set `APP_URL=https://job-assistant-nine.vercel.app`. Paste only the comma-separated addresses in the value field for `GOOGLE_ALLOWED_EMAIL` (without quotes or the variable name).
+
+6. Restart the local app and worker, or **redeploy Vercel after changing environment variables and deploying this code**. Open **Settings → Connect Gmail**, choose either allowed account, and grant both requested Gmail permissions.
+
+To switch accounts, use **Settings → Disconnect Gmail → Connect Gmail**, then select the other account. Only one mailbox is connected at a time. Disconnect removes its saved credentials and attempts to revoke its Google grant; application history remains in this shared personal workspace. Removing an address from the allowed list also blocks further Gmail operations for that account after restarting/redeploying.
+
+Drafts and sent threads record their owning Gmail address. After switching accounts, saving an unsent email creates a new Gmail draft in the connected account, clears approval, and requires review again. The original draft remains in the previous mailbox. Reply checks and follow-ups use only the account that sent the original application. Older drafts without a recorded sender must be saved again before approval; reconnecting or disconnecting an existing connection records its ownership before switching.
 
 If Google returns you to Folio's password screen, update and restart the app, sign in, and start **Connect Gmail** again. The session must use `SameSite=Lax` so it survives Google's redirect; starting a new connection replaces older session cookies. Always open `http://localhost:3210` rather than `127.0.0.1`, matching `APP_URL` and the registered callback. A failed connection now stays in the workspace and shows the reason, such as missing Gmail permissions or choosing a different account. Select both Gmail permissions on Google's consent screen. Server logs record a sanitized failure stage without OAuth codes or tokens.
 
-The requested scopes are `openid`, `email`, `gmail.compose` (drafts and sending), and `gmail.readonly` (draft integrity and tracked thread reads). Google permissions are broader than the app's thread-checking behavior. The app rejects a Google identity that differs from `GOOGLE_ALLOWED_EMAIL`.
+The requested scopes are `openid`, `email`, `gmail.compose` (drafts and sending), and `gmail.readonly` (draft integrity and tracked thread reads). Google permissions are broader than the app's thread-checking behavior. The app requires a verified Google identity matching an exact address in `GOOGLE_ALLOWED_EMAIL`.
 
 Google may show an unverified-app warning for a personal project. An external OAuth application left in Testing normally has refresh tokens that expire after seven days for these scopes; reconnect when required. Personal-use exceptions and public distribution have different verification requirements. See [OAuth token expiration](https://developers.google.com/identity/protocols/oauth2#expiration), [verification exceptions](https://support.google.com/cloud/answer/13464323?hl=en), and [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
@@ -88,7 +115,7 @@ The application uses the Gmail API, not SMTP or your Google password. Gmail cred
 - Send through Folio for automatic tracking. Messages sent directly from Gmail are not automatically reconciled. If a send times out, the draft is held as **uncertain** and cannot be retried through the app. Check Gmail Sent manually; this version has no recovery/reconciliation UI for that state.
 - Reply checks inspect metadata in up to 100 known sent application threads per run. Separate-thread responses, some delivery reports, and messages outside those threads can be missed. Automatic acknowledgments are conservatively treated as replies. There is no full inbox AI reader or automatic response sending.
 - Only one follow-up per application is supported. Background jobs discover vacancies and check replies; they never send messages.
-- The app is a local single-owner installation, not a publicly deployed or multi-user service. Cloud hosting would require persistent storage, HTTPS, process supervision, backups, and a separate deployment review. Do not place the SQLite data directory on ephemeral serverless storage.
+- The app is a single-owner workspace. Neon Postgres and private object storage provide persistence across Vercel instances and deployments. Multi-user tenancy is not implemented.
 
 ## Files and data
 
@@ -102,21 +129,20 @@ The application uses the Gmail API, not SMTP or your Google password. Gmail cred
 | Persistence and action handlers                 | `src/lib/db.ts`, `src/lib/service.ts`    |
 | Scheduled task worker                           | `scripts/worker.ts`                      |
 | Behavioral tests                                | `tests/core.test.ts`                     |
-| Private local records and encrypted files       | `data/` (excluded from version control)  |
+| Cloud records and encrypted files               | Neon Postgres and private S3 bucket      |
 
-Résumé binaries and Gmail tokens are encrypted; profile text, company/job records, and email drafts are stored in the local database. Protect the computer and its backups accordingly. The encryption key is generated at `data/.encryption-key` unless `APP_ENCRYPTION_KEY` is supplied. Preserve that key: losing it makes encrypted records unreadable.
-
-To back up, stop **both** processes and copy the complete data directory together with your configuration and encryption key to secure storage. Do not copy only an active SQLite main file and omit its WAL. To restore, keep the matching database, uploaded files, and original key together. Do not replace a key on an existing installation.
-
-The browser smoke test workspace is isolated in `output/browser-data`; it is not your real profile. Screenshots are in `output/playwright`. Existing job research outside this application was not modified.
+Résumé binaries and Gmail tokens are encrypted with `APP_ENCRYPTION_KEY`. Profile text, companies, jobs, drafts, and activity are stored in Postgres. Back up the database, object storage, and matching encryption key together. The app never creates a local data directory or encryption-key file at runtime.
 
 ## Verify changes
 
 ```bash
 npm test
+npx tsx tests/http-smoke.ts
 npm run typecheck
 npm run build
 npm audit
 ```
 
-Tests cover authentication and encryption, source restrictions, imports, failed feed preservation, confirmation requirements, draft approval invalidation, concurrent send clicks, uncertain send outcomes, changes during sending, OpenRouter request/privacy/accounting behavior, and résumé extraction. Browser checks cover desktop/mobile flows and accessibility. Live credentials are still needed to validate external AI and Gmail integrations end to end.
+Tests use isolated Postgres schemas and S3 prefixes. Start the services in `compose.test.yml` with `docker compose -f compose.test.yml up -d` before running them; stop them afterward with `docker compose -f compose.test.yml down`. Tests never read the production `.env`. Override only `TEST_DATABASE_URL` and `TEST_S3_*` to use dedicated test services.
+
+Tests cover authentication and encryption, source restrictions, imports, failed feed preservation, confirmation requirements, draft approval invalidation, concurrent send clicks, uncertain send outcomes, changes during sending, OpenRouter request/privacy/accounting behavior, and résumé extraction.  Live credentials are still needed to validate external AI and Gmail integrations end to end.

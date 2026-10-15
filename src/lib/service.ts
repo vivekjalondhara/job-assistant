@@ -20,7 +20,7 @@ import {
   profileSchema,
   settingsSchema,
 } from "./validation";
-import { analyzeJob, exclusive, extractProfile, writeEmail } from "./ai";
+import { analyzeJob, exclusive, extractProfile, polishEmail, writeEmail } from "./ai";
 import {
   approveDraft,
   connection,
@@ -343,6 +343,23 @@ async function performAction(actionName: string, input: unknown) {
         };
       });
     }
+    case "draft.polish":
+      return exclusive(`draft:${itemId()}`, async () => {
+        const draft = await requireDraft(itemId());
+        editable(draft);
+        if (z.number().int().parse(p.version) !== draft.version)
+          throw new AppError(
+            "The draft changed in another tab. Reload before improving the English.",
+            409,
+          );
+        const suggestion = await polishEmail(draft);
+        const latest = await requireDraft(draft.id);
+        editable(latest);
+        if (latest.version !== draft.version)
+          throw new AppError("The email changed while editing. Request a new suggestion.", 409);
+        // A suggestion never overwrites the draft, approval, or Gmail content.
+        return { suggestion };
+      });
     case "draft.template":
       return exclusive(`draft:${itemId()}`, async () => {
         const draft = await requireDraft(itemId());

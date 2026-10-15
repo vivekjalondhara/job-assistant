@@ -36,7 +36,9 @@ try {
   unsigned.search = "";
   const anonymous = await fetch(unsigned, { signal: AbortSignal.timeout(15000) });
   if (![401, 403].includes(anonymous.status)) throw new Error("Bucket must deny anonymous reads");
-  console.log("Private S3 upload, download, encryption, signed URL, and anonymous-access denial: OK");
+  console.log(
+    "Private S3 upload, download, encryption, signed URL, and anonymous-access denial: OK",
+  );
 } catch (error) {
   console.error(
     `Cloud check failed at ${step}. Check the corresponding .env values and provider permissions.`,
