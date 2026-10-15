@@ -33,27 +33,24 @@ import { inferBoard } from "./jobs";
 import { matchJob } from "./matching";
 import { localEmail } from "./local-email";
 import type { AppState, Company, Draft, Job, Usage } from "./types";
-
-export function state(): AppState {
-  const conn = connection();
-  const user = profile();
+export async function state(): Promise<AppState> {
+  const conn = await connection();
+  const user = await profile();
   return {
     profile: user,
-    companies: all("company"),
-    jobs: all<Job>("job")
-      .slice(0, 2000)
-      .map((job) => ({
-        ...job,
-        match:
-          job.match?.method === "ai" && job.match.profileUpdatedAt === user.updatedAt
-            ? job.match
-            : matchJob(job, user),
-      })),
-    drafts: all("draft"),
-    settings: settings(),
-    activity: all<AppState["activity"][number]>("activity").slice(0, 40),
-    usage: all<Usage>("usage"),
-    tasks: tasks(),
+    companies: await all("company"),
+    jobs: (await all<Job>("job")).slice(0, 2000).map((job) => ({
+      ...job,
+      match:
+        job.match?.method === "ai" && job.match.profileUpdatedAt === user.updatedAt
+          ? job.match
+          : matchJob(job, user),
+    })),
+    drafts: await all("draft"),
+    settings: await settings(),
+    activity: (await all<AppState["activity"][number]>("activity")).slice(0, 40),
+    usage: await all<Usage>("usage"),
+    tasks: await tasks(),
     connections: {
       openrouter: !!(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_MODEL),
       model: process.env.OPENROUTER_MODEL || "",
@@ -61,17 +58,22 @@ export function state(): AppState {
       gmail: !!conn && !conn.needsReconnect,
       gmailEmail: conn?.email || "",
       gmailNeedsReconnect: conn?.needsReconnect || false,
-      workerLastSeen: get<{ at: string }>("worker", "main")?.at || null,
+      workerLastSeen:
+        (
+          await get<{
+            at: string;
+          }>("worker", "main")
+        )?.at || null,
     },
   };
 }
-function requireJob(jobId: string) {
-  const value = get<Job>("job", jobId);
+async function requireJob(jobId: string) {
+  const value = await get<Job>("job", jobId);
   if (!value) throw new AppError("Job not found.", 404);
   return value;
 }
-function requireDraft(draftId: string) {
-  const value = get<Draft>("draft", draftId);
+async function requireDraft(draftId: string) {
+  const value = await get<Draft>("draft", draftId);
   if (!value) throw new AppError("Draft not found.", 404);
   return value;
 }
@@ -82,8 +84,8 @@ function editable(draft: Draft) {
       409,
     );
 }
-function newDraft(job: Job, company: Company): Draft {
-  const p = profile();
+async function newDraft(job: Job, company: Company): Promise<Draft> {
+  const p = await profile();
   return {
     id: id(),
     jobId: job.id,
@@ -115,6 +117,24 @@ function newDraft(job: Job, company: Company): Draft {
   };
 }
 export async function action(actionName: string, input: unknown) {
+  const atomic = [
+    "profile.save",
+    "company.save",
+    "company.contacts",
+    "company.scan",
+    "job.create",
+    "job.status",
+    "job.application",
+    "draft.create",
+    "draft.followup",
+    "settings.save",
+    "gmail.sync",
+  ];
+  return atomic.includes(actionName)
+    ? transaction(() => performAction(actionName, input))
+    : performAction(actionName, input);
+}
+async function performAction(actionName: string, input: unknown) {
   const p = z.record(z.string(), z.unknown()).parse(input || {});
   const itemId = () => z.string().uuid().parse(p.id);
   switch (actionName) {
@@ -122,10 +142,11 @@ export async function action(actionName: string, input: unknown) {
       const parsed = profileSchema.parse(p);
       if (parsed.confirmed && (!parsed.name || !parsed.experience || !parsed.skills.length))
         throw new AppError("Add your name, experience, and skills before confirming your profile.");
-      const next = { ...profile(), ...parsed, updatedAt: now() };
-      transaction(() => {
-        put("profile", next);
-        for (const job of all<Job>("job")) put("job", { ...job, match: matchJob(job, next) });
+      const next = { ...(await profile()), ...parsed, updatedAt: now() };
+      await transaction(async () => {
+        await put("profile", next);
+        for (const job of await all<Job>("job"))
+          await put("job", { ...job, match: matchJob(job, next) });
       });
       return {
         message: parsed.confirmed
@@ -140,7 +161,7 @@ export async function action(actionName: string, input: unknown) {
       });
     case "company.save": {
       const parsed = companySchema.parse(p);
-      const old = typeof p.id === "string" ? get<Company>("company", p.id) : null;
+      const old = typeof p.id === "string" ? await get<Company>("company", p.id) : null;
       const board = inferBoard(parsed.careersUrl);
       const sourceChanged = !!old && (old.source !== board.source || old.board !== board.board);
       const company: Company = {
@@ -153,13 +174,17 @@ export async function action(actionName: string, input: unknown) {
         checkNote: sourceChanged ? "" : old?.checkNote || "",
         createdAt: old?.createdAt || now(),
       };
-      put("company", company);
+      await put("company", company);
       return { message: "Company saved." };
     }
     case "company.contacts": {
       const companyId = itemId();
-      const contacts: { email: string; source: string; context: string }[] = [];
-      for (const job of all<Job>("job").filter(
+      const contacts: {
+        email: string;
+        source: string;
+        context: string;
+      }[] = [];
+      for (const job of (await all<Job>("job")).filter(
         (j) => j.companyId === companyId && j.status !== "closed",
       )) {
         for (const found of job.description.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) {
@@ -183,15 +208,15 @@ export async function action(actionName: string, input: unknown) {
       };
     }
     case "company.scan": {
-      if (settings().automationPaused)
+      if ((await settings()).automationPaused)
         throw new AppError("Automation is paused. Resume it in Settings.");
       const list = p.id
-        ? ([get<Company>("company", itemId())].filter(Boolean) as Company[])
-        : all<Company>("company");
+        ? ([await get<Company>("company", itemId())].filter(Boolean) as Company[])
+        : await all<Company>("company");
       let count = 0;
       for (const c of list.filter((c) => !c.paused)) {
-        enqueue("scan", c.id);
-        put("company", {
+        await enqueue("scan", c.id);
+        await put("company", {
           ...c,
           checkStatus: "queued",
           checkNote: "Waiting for the background worker.",
@@ -202,7 +227,7 @@ export async function action(actionName: string, input: unknown) {
     }
     case "job.create": {
       const parsed = jobSchema.parse(p);
-      if (!get<Company>("company", parsed.companyId))
+      if (!(await get<Company>("company", parsed.companyId)))
         throw new AppError("Choose an existing company.");
       const job: Job = {
         id: id(),
@@ -217,76 +242,79 @@ export async function action(actionName: string, input: unknown) {
         createdAt: now(),
         updatedAt: now(),
       };
-      job.match = matchJob(job, profile());
-      put("job", job);
+      job.match = matchJob(job, await profile());
+      await put("job", job);
       return { message: "Job added." };
     }
     case "job.status": {
-      const job = requireJob(itemId());
+      const job = await requireJob(itemId());
       const status = z.enum(["new", "shortlisted", "skipped", "closed"]).parse(p.status);
-      put("job", { ...job, status });
+      await put("job", { ...job, status });
       return {
         message: status === "shortlisted" ? "Added to your shortlist." : "Job status updated.",
       };
     }
     case "job.application": {
-      const job = requireJob(itemId());
+      const job = await requireJob(itemId());
       const applicationStatus = z
         .enum(["not_submitted", "submitted", "interview", "offer", "rejected", "withdrawn"])
         .parse(p.status);
-      put("job", { ...job, applicationStatus });
-      activity("Application updated", `${job.title} · ${applicationStatus.replaceAll("_", " ")}`);
+      await put("job", { ...job, applicationStatus });
+      await activity(
+        "Application updated",
+        `${job.title} · ${applicationStatus.replaceAll("_", " ")}`,
+      );
       return { message: "Application status updated." };
     }
     case "job.match": {
-      const job = requireJob(itemId());
+      const job = await requireJob(itemId());
       return exclusive(`match:${job.id}`, async () => {
         const match = await analyzeJob(job);
-        const latest = requireJob(job.id);
+        const latest = await requireJob(job.id);
         if (latest.updatedAt !== job.updatedAt)
           throw new AppError("The job changed during analysis. Please try again.", 409);
-        put("job", { ...latest, match });
+        await put("job", { ...latest, match });
         return { message: "AI match analysis is ready." };
       });
     }
     case "draft.create": {
-      const job = requireJob(itemId());
-      const company = get<Company>("company", job.companyId)!;
-      const previous = all<Draft>("draft").find((d) => d.jobId === job.id && !d.followUpOf);
+      const job = await requireJob(itemId());
+      const company = (await get<Company>("company", job.companyId))!;
+      const previous = (await all<Draft>("draft")).find((d) => d.jobId === job.id && !d.followUpOf);
       if (previous)
         return { message: "Opened your existing application email.", draftId: previous.id };
-      const draft = newDraft(job, company);
-      put("draft", draft);
+      const draft = await newDraft(job, company);
+      await put("draft", draft);
       return { message: "Email composer opened.", draftId: draft.id };
     }
     case "draft.generate": {
-      const draft = requireDraft(itemId());
+      const draft = await requireDraft(itemId());
       editable(draft);
       if (draft.followUpOf)
         throw new AppError(
           "Edit the follow-up directly; application generation is for first emails.",
         );
       return exclusive(`draft:${draft.id}`, async () => {
-        const job = requireJob(draft.jobId);
-        const company = get<Company>("company", draft.companyId)!;
-        const before = profile().updatedAt;
+        const job = await requireJob(draft.jobId);
+        const company = (await get<Company>("company", draft.companyId))!;
+        const before = (await profile()).updatedAt;
         const version = z.number().int().parse(p.version);
         if (version !== draft.version)
           throw new AppError("The draft changed in another tab. Reload before generating.", 409);
         const style = z.string().trim().max(1000).optional().parse(p.style);
         const result = await writeEmail(job, company, style, draft.body, !!draft.resumeId);
-        const latest = requireDraft(draft.id);
+        const latest = await requireDraft(draft.id);
         if (
-          profile().updatedAt !== before ||
+          (await profile()).updatedAt !== before ||
           latest.version !== draft.version ||
-          requireJob(job.id).updatedAt !== job.updatedAt
+          (await requireJob(job.id)).updatedAt !== job.updatedAt
         )
           throw new AppError(
             "The inputs changed while generating. Try again with the latest version.",
             409,
           );
-        const user = profile();
-        put("draft", {
+        const user = await profile();
+        await put("draft", {
           ...latest,
           subject: result.value.subject,
           body: result.value.body,
@@ -305,7 +333,11 @@ export async function action(actionName: string, input: unknown) {
           jobUpdatedAt: job.updatedAt,
           updatedAt: now(),
         });
-        activity("Application email generated", `${job.title} · ready for your review`, "success");
+        await activity(
+          "Application email generated",
+          `${job.title} · ready for your review`,
+          "success",
+        );
         return {
           message: "Email generated. Check the claims and recipient before saving to Gmail.",
         };
@@ -313,13 +345,13 @@ export async function action(actionName: string, input: unknown) {
     }
     case "draft.template":
       return exclusive(`draft:${itemId()}`, async () => {
-        const draft = requireDraft(itemId());
+        const draft = await requireDraft(itemId());
         editable(draft);
         if (z.number().int().parse(p.version) !== draft.version)
           throw new AppError("The draft changed in another tab. Reload before generating.", 409);
-        const job = requireJob(draft.jobId);
-        const company = get<Company>("company", job.companyId);
-        const user = profile();
+        const job = await requireJob(draft.jobId);
+        const company = await get<Company>("company", job.companyId);
+        const user = await profile();
         if (!user.confirmed || !user.name || !user.experience || !user.skills.length)
           throw new AppError("Confirm your profile with your name, experience, and skills first.");
         if (!company) throw new AppError("Company not found.", 404);
@@ -329,7 +361,7 @@ export async function action(actionName: string, input: unknown) {
           throw new AppError("The local application template is not for follow-ups.");
         const resumeId = draft.resumeId ? user.resumeId : "";
         const result = localEmail(job, company, user, !!resumeId);
-        put("draft", {
+        await put("draft", {
           ...draft,
           ...result,
           resumeId,
@@ -350,13 +382,13 @@ export async function action(actionName: string, input: unknown) {
       });
     case "draft.save":
       return exclusive(`draft:${itemId()}`, async () => {
-        const draft = requireDraft(itemId());
+        const draft = await requireDraft(itemId());
         editable(draft);
         const parsed = draftEditSchema.parse(p);
         if (parsed.version !== draft.version)
           throw new AppError("The draft changed in another tab. Reload before editing.", 409);
-        const user = profile();
-        put("draft", {
+        const user = await profile();
+        await put("draft", {
           ...draft,
           to: parsed.to,
           subject: parsed.subject,
@@ -380,7 +412,7 @@ export async function action(actionName: string, input: unknown) {
           approvedAt: null,
           gmailRawHash: null,
           profileUpdatedAt: user.updatedAt,
-          jobUpdatedAt: requireJob(draft.jobId).updatedAt,
+          jobUpdatedAt: (await requireJob(draft.jobId)).updatedAt,
           updatedAt: now(),
         });
         return { message: "Email saved. Any earlier approval has been cleared." };
@@ -397,22 +429,22 @@ export async function action(actionName: string, input: unknown) {
       await sendDraft(itemId());
       return { message: "Email sent through Gmail." };
     case "draft.followup": {
-      const original = requireDraft(itemId());
+      const original = await requireDraft(itemId());
       if (original.status !== "sent" || original.replyStatus !== "none" || !original.sentAt)
         throw new AppError(
           "Follow-ups are only available for sent messages with no reply or bounce.",
         );
-      if (Date.now() - Date.parse(original.sentAt) < settings().followUpDays * 86400000)
+      if (Date.now() - Date.parse(original.sentAt) < (await settings()).followUpDays * 86400000)
         throw new AppError("The follow-up reminder is not due yet.");
       if (original.followUpOf)
         throw new AppError("Only one follow-up is supported per application.");
-      const previous = all<Draft>("draft").find((d) => d.followUpOf === original.id);
+      const previous = (await all<Draft>("draft")).find((d) => d.followUpOf === original.id);
       if (previous) return { message: "Opened your existing follow-up.", draftId: previous.id };
-      const job = requireJob(original.jobId),
-        company = get<Company>("company", job.companyId)!;
-      const user = profile();
+      const job = await requireJob(original.jobId),
+        company = (await get<Company>("company", job.companyId))!;
+      const user = await profile();
       const draft = {
-        ...newDraft(job, company),
+        ...(await newDraft(job, company)),
         to: original.to,
         subject: `Re: ${original.subject}`,
         body: `Hi Hiring Team,\n\nI wanted to follow up on my email about the ${job.title} role. I’m still interested and would be happy to share any additional information that would be useful.\n\nThanks for your time,\n${user.signature || user.name}`,
@@ -420,17 +452,17 @@ export async function action(actionName: string, input: unknown) {
         resumeName: "",
         followUpOf: original.id,
       };
-      put("draft", draft);
+      await put("draft", draft);
       return { message: "Follow-up prepared for review.", draftId: draft.id };
     }
     case "settings.save":
-      put("settings", { ...settings(), ...settingsSchema.parse(p) });
+      await put("settings", { ...(await settings()), ...settingsSchema.parse(p) });
       return { message: "Settings saved." };
     case "gmail.disconnect":
       await disconnectGmail();
       return { message: "Gmail disconnected." };
     case "gmail.sync":
-      enqueue("replies", "main");
+      await enqueue("replies", "main");
       return { message: "Reply check queued." };
     default:
       throw new AppError("Unknown action.", 404);

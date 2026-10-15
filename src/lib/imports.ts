@@ -3,7 +3,6 @@ import { all, put, now, id, activity, transaction } from "./db";
 import type { Company, Job } from "./types";
 import { inferBoard } from "./jobs";
 import { AppError } from "./security";
-
 const cleanUrl = (s: string) => {
   try {
     const u = new URL(s);
@@ -12,7 +11,7 @@ const cleanUrl = (s: string) => {
     return "";
   }
 };
-export function importCsv(csv: string, includeJobs = false) {
+export async function importCsv(csv: string, includeJobs = false) {
   let rows: Record<string, string>[];
   try {
     rows = parse(csv, {
@@ -26,11 +25,11 @@ export function importCsv(csv: string, includeJobs = false) {
     throw new AppError("Could not read this CSV. Include a header row and valid quoted cells.");
   }
   if (rows.length > 1000) throw new AppError("Import up to 1,000 rows at a time.");
-  const companies = all<Company>("company"),
-    jobs = all<Job>("job");
+  const companies = await all<Company>("company"),
+    jobs = await all<Job>("job");
   let companyCount = 0,
     jobCount = 0;
-  transaction(() => {
+  await transaction(async () => {
     for (const original of rows) {
       const r = Object.fromEntries(
         Object.entries(original).map(([k, v]) => [k.toLowerCase().trim(), v]),
@@ -60,7 +59,7 @@ export function importCsv(csv: string, includeJobs = false) {
           createdAt: now(),
         };
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(company.email)) company.email = "";
-        put("company", company);
+        await put("company", company);
         companies.push(company);
         companyCount++;
       }
@@ -101,7 +100,7 @@ export function importCsv(csv: string, includeJobs = false) {
         createdAt: now(),
         updatedAt: now(),
       };
-      put("job", job);
+      await put("job", job);
       jobs.push(job);
       jobCount++;
     }
@@ -114,7 +113,7 @@ export function importCsv(csv: string, includeJobs = false) {
     )
   )
     throw new AppError("Add a Company, Company name, or Name column to your CSV.");
-  activity(
+  await activity(
     "Company list imported",
     `${companyCount} companies and ${jobCount} research listings added.`,
     "success",

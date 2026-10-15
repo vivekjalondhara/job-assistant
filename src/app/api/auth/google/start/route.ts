@@ -10,7 +10,7 @@ export async function GET() {
     const url = authorizationUrl(state);
     // Also replace older Strict cookies before leaving the app for Google.
     await setSession();
-    put("oauth", { id: digest(state), expires: Date.now() + 600000 });
+    await put("oauth", { id: digest(state), expires: Date.now() + 600000 });
     (await cookies()).set("folio_oauth", state, {
       httpOnly: true,
       sameSite: "lax",

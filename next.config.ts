@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 const config: NextConfig = {
-  serverExternalPackages: ["better-sqlite3", "pdf-parse"],
+  serverExternalPackages: ["pg", "@neondatabase/serverless", "ws", "pdf-parse"],
   outputFileTracingExcludes: { "/*": ["./data/**/*", "./output/**/*", "./.env*"] },
   experimental: { serverActions: { bodySizeLimit: "10mb" } },
   async headers() {

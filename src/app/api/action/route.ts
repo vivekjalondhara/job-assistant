@@ -1,7 +1,9 @@
+import { after } from "next/server";
+import { runWorker } from "@/lib/worker";
 import { z } from "zod";
 import { requireAuth, assertSameOrigin, AppError } from "@/lib/security";
 import { action } from "@/lib/service";
-export const maxDuration = 120;
+export const maxDuration = 300;
 export async function POST(req: Request) {
   try {
     assertSameOrigin(req);
@@ -13,7 +15,16 @@ export async function POST(req: Request) {
     const parsed = z
       .object({ action: z.string(), payload: z.unknown().optional() })
       .parse(JSON.parse(raw));
-    return Response.json(await action(parsed.action, parsed.payload));
+    const result = await action(parsed.action, parsed.payload);
+    if (["company.scan", "gmail.sync"].includes(parsed.action))
+      after(async () => {
+        try {
+          await runWorker(120000);
+        } catch {
+          console.error("[worker] Queued work will retry on the next trigger.");
+        }
+      });
+    return Response.json(result);
   } catch (e) {
     return Response.json(
       {

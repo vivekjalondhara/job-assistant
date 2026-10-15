@@ -1,9 +1,8 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { putObject, readObject, deleteObject, resumeKey } from "./storage";
 import path from "node:path";
-import { dataDir, get, put, id, now, profile, all, transaction } from "./db";
+import { get, put, id, now, profile, all, transaction } from "./db";
 import type { Job } from "./types";
 import { AppError, encrypt, decrypt } from "./security";
-
 export interface ResumeFile {
   id: string;
   name: string;
@@ -12,7 +11,7 @@ export interface ResumeFile {
   createdAt: string;
 }
 export async function uploadResume(file: File) {
-  if (file.size > 8 * 1024 * 1024) throw new AppError("Upload a résumé smaller than 8 MB.");
+  if (file.size > 4 * 1024 * 1024) throw new AppError("Upload a résumé smaller than 4 MB.");
   const ext = path.extname(file.name).toLowerCase();
   if (![".pdf", ".docx", ".txt"].includes(ext))
     throw new AppError("Use a PDF, DOCX, or plain text résumé.");
@@ -57,10 +56,7 @@ export async function uploadResume(file: File) {
     );
   const fileId = id();
   const name = file.name.replace(/[\r\n/\\]/g, "_").slice(0, 160);
-  mkdirSync(path.join(dataDir, "resumes"), { recursive: true, mode: 0o700 });
-  writeFileSync(path.join(dataDir, "resumes", fileId), encrypt(buffer.toString("base64")), {
-    mode: 0o600,
-  });
+  await putObject(resumeKey(fileId), encrypt(buffer.toString("base64")));
   const meta: ResumeFile = {
     id: fileId,
     name,
@@ -73,24 +69,29 @@ export async function uploadResume(file: File) {
     size: file.size,
     createdAt: now(),
   };
-  put("file", meta);
-  transaction(() => {
-    put("profile", {
-      ...profile(),
-      resumeId: fileId,
-      resumeName: name,
-      resumeText: text.slice(0, 60000),
-      confirmed: false,
-      updatedAt: now(),
+  try {
+    await transaction(async () => {
+      await put("file", meta);
+      await put("profile", {
+        ...(await profile()),
+        resumeId: fileId,
+        resumeName: name,
+        resumeText: text.slice(0, 60000),
+        confirmed: false,
+        updatedAt: now(),
+      });
+      for (const job of await all<Job>("job")) await put("job", { ...job, match: null });
     });
-    for (const job of all<Job>("job")) put("job", { ...job, match: null });
-  });
+  } catch (error) {
+    await deleteObject(resumeKey(fileId)).catch(() => {});
+    throw error;
+  }
   return meta;
 }
-export function readResume(fileId: string) {
+export async function readResume(fileId: string) {
   if (!/^[a-f0-9-]{36}$/.test(fileId)) throw new AppError("Invalid résumé reference.");
-  const meta = get<ResumeFile>("file", fileId);
-  const location = path.join(dataDir, "resumes", fileId);
-  if (!meta || !existsSync(location)) throw new AppError("Résumé not found. Upload it again.", 404);
-  return { meta, buffer: Buffer.from(decrypt<string>(readFileSync(location, "utf8")), "base64") };
+  const meta = await get<ResumeFile>("file", fileId);
+  if (!meta) throw new AppError("Résumé not found. Upload it again.", 404);
+  const encrypted = await readObject(resumeKey(fileId));
+  return { meta, buffer: Buffer.from(decrypt<string>(encrypted), "base64") };
 }

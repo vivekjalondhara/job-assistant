@@ -257,7 +257,7 @@ export function ProfilePanel({
               <FileText size={23} />
             </span>
             <h2>Your résumé</h2>
-            <p className="muted">Bring your experience with you. PDF, DOCX, or TXT, up to 8 MB.</p>
+            <p className="muted">Bring your experience with you. PDF, DOCX, or TXT, up to 4 MB.</p>
             {p.resumeName && (
               <a className="resume-file" href={`/api/resume/${p.resumeId}`}>
                 <FileText size={18} />
@@ -698,7 +698,7 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
           <label className="toggle-row">
             <span>
               <strong>Check companies daily</strong>
-              <small>Run one scheduled search each day while the worker is running.</small>
+              <small>Run daily through the scheduler, or while your workspace is open.</small>
             </span>
             <input type="checkbox" name="dailySearch" defaultChecked={options.dailySearch} />
           </label>

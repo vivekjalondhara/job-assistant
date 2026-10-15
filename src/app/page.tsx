@@ -5,5 +5,5 @@ import Workspace from "@/components/workspace";
 export const dynamic = "force-dynamic";
 export default async function Home() {
   if (!(await isAuthenticated())) redirect("/login");
-  return <Workspace initialState={state()} />;
+  return <Workspace initialState={await state()} />;
 }

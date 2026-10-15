@@ -316,7 +316,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                 ? "Automation paused"
                 : workerOnline
                   ? "Workspace running"
-                  : "Worker offline"}
+                  : "Background tasks on demand"}
             </span>
             <span className="topbar-divider" />
             <span className="small muted">

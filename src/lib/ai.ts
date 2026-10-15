@@ -11,20 +11,28 @@ import {
 } from "./prompts";
 import { jobInsights } from "./job-insights";
 import { contentChecks } from "./email-checks";
-
 export async function exclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const owner = id();
-  transaction(() => {
-    const lock = get<{ expires: number }>("lock", key);
+  await transaction(async () => {
+    const lock = await get<{
+      expires: number;
+    }>("lock", key);
     if (lock && lock.expires > Date.now())
       throw new AppError("This action is already running. Please wait.", 409);
-    put("lock", { id: key, owner, expires: Date.now() + 180000 });
+    await put("lock", { id: key, owner, expires: Date.now() + 180000 });
   });
   try {
     return await fn();
   } finally {
-    transaction(() => {
-      if (get<{ owner: string }>("lock", key)?.owner === owner) remove("lock", key);
+    await transaction(async () => {
+      if (
+        (
+          await get<{
+            owner: string;
+          }>("lock", key)
+        )?.owner === owner
+      )
+        await remove("lock", key);
     });
   }
 }
@@ -33,19 +41,22 @@ export async function generate<T>(
   schema: z.ZodType<T>,
   instructions: string,
   input: unknown,
-): Promise<{ value: T; model: string }> {
+): Promise<{
+  value: T;
+  model: string;
+}> {
   const key = process.env.OPENROUTER_API_KEY,
     model = process.env.OPENROUTER_MODEL;
   if (!key || !model)
     throw new AppError(
-      "Configure OPENROUTER_API_KEY and OPENROUTER_MODEL in .env.local, then restart the application.",
+      "Configure OPENROUTER_API_KEY and OPENROUTER_MODEL in .env, then restart the application.",
       503,
     );
   const month = now().slice(0, 7);
-  const used = all<Usage>("usage")
+  const used = (await all<Usage>("usage"))
     .filter((u) => u.createdAt.startsWith(month))
     .reduce((n, u) => n + (u.cost || 0), 0);
-  if (used >= settings().monthlyAiBudget)
+  if (used >= (await settings()).monthlyAiBudget)
     throw new AppError(
       "Your recorded monthly AI spending limit has been reached. Adjust it in Settings to continue.",
       429,
@@ -101,7 +112,7 @@ export async function generate<T>(
   const result = await response.json();
   const usage = result.usage;
   const numberOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
-  put<Usage>("usage", {
+  await put<Usage>("usage", {
     id: id(),
     operation,
     model: result.model || model,
@@ -128,7 +139,7 @@ export async function generate<T>(
   }
 }
 export async function extractProfile() {
-  const p = profile();
+  const p = await profile();
   if (!p.resumeText) throw new AppError("Upload a résumé first.");
   const result = await generate(
     "resume_extraction",
@@ -136,15 +147,15 @@ export async function extractProfile() {
     profileExtractionPrompt,
     { resume: p.resumeText.slice(0, 30000) },
   );
-  if (profile().updatedAt !== p.updatedAt)
+  if ((await profile()).updatedAt !== p.updatedAt)
     throw new AppError(
       "Your profile changed during extraction. Please try again with the current version.",
       409,
     );
   const updated = { ...p, ...result.value, confirmed: false, updatedAt: now() };
-  transaction(() => {
-    put("profile", updated);
-    for (const job of all<Job>("job")) put("job", { ...job, match: null });
+  await transaction(async () => {
+    await put("profile", updated);
+    for (const job of await all<Job>("job")) await put("job", { ...job, match: null });
   });
   return updated;
 }
@@ -155,7 +166,7 @@ export async function writeEmail(
   previous?: string,
   resumeAttached?: boolean,
 ) {
-  const p = profile();
+  const p = await profile();
   if (!p.confirmed || !p.name || !p.experience)
     throw new AppError(
       "Confirm your profile with your name and experience before generating an email.",
@@ -208,7 +219,7 @@ export async function writeEmail(
   return result;
 }
 export async function analyzeJob(job: Job) {
-  const p = profile();
+  const p = await profile();
   if (!p.confirmed) throw new AppError("Confirm your profile first.");
   const schema = z.object({
     rating: z.enum(["strong", "possible", "weak"]),
@@ -233,7 +244,7 @@ export async function analyzeJob(job: Job) {
       description: job.description.slice(0, 25000),
     },
   });
-  if (profile().updatedAt !== p.updatedAt)
+  if ((await profile()).updatedAt !== p.updatedAt)
     throw new AppError("Your profile changed during analysis. Please run the match again.", 409);
   return { ...result.value, method: "ai" as const, profileUpdatedAt: p.updatedAt };
 }

@@ -1,16 +1,12 @@
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { setupTestStorage } from "./setup";
 import { zipSync, strToU8 } from "fflate";
 import { z } from "zod";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { EmailPanel } from "../src/components/email-panel";
-
-const directory = mkdtempSync(path.join(tmpdir(), "folio-tests-"));
-process.env.DATA_DIR = directory;
+const cleanup = await setupTestStorage();
 process.env.APP_URL = "http://localhost:3210";
 const store = await import("../src/lib/db");
 const security = await import("../src/lib/security");
@@ -30,18 +26,18 @@ type Draft = import("../src/lib/types").Draft;
 type Job = import("../src/lib/types").Job;
 type Company = import("../src/lib/types").Company;
 const originalFetch = global.fetch;
-beforeEach(() => {
+beforeEach(async () => {
   global.fetch = originalFetch;
-  store.db().exec("DELETE FROM records; DELETE FROM tasks;");
+  await store.query("DELETE FROM folio_records; DELETE FROM folio_tasks;");
   delete process.env.OPENROUTER_API_KEY;
   delete process.env.OPENROUTER_MODEL;
 });
-after(() => {
+after(async () => {
   global.fetch = originalFetch;
-  store.db().close();
-  rmSync(directory, { recursive: true, force: true });
+  await store.closeDatabase();
+  await cleanup();
 });
-function fixtures() {
+async function fixtures() {
   const at = store.now();
   const p = {
     ...emptyProfile,
@@ -51,7 +47,7 @@ function fixtures() {
     confirmed: true,
     updatedAt: at,
   };
-  store.put("profile", p);
+  await store.put("profile", p);
   const company: Company = {
     id: store.id(),
     name: "Test Company",
@@ -69,7 +65,7 @@ function fixtures() {
     checkNote: "",
     createdAt: at,
   };
-  store.put("company", company);
+  await store.put("company", company);
   const job: Job = {
     id: store.id(),
     companyId: company.id,
@@ -90,7 +86,7 @@ function fixtures() {
     createdAt: at,
     updatedAt: at,
   };
-  store.put("job", job);
+  await store.put("job", job);
   const draft: Draft = {
     id: store.id(),
     jobId: job.id,
@@ -120,8 +116,8 @@ function fixtures() {
     createdAt: at,
     updatedAt: at,
   };
-  store.put("draft", draft);
-  store.put("secret", {
+  await store.put("draft", draft);
+  await store.put("secret", {
     id: "gmail",
     value: security.encrypt({
       email: "owner@example.com",
@@ -133,7 +129,12 @@ function fixtures() {
   });
   return { p, company, job, draft };
 }
-function gmailMock(options: { raw?: string; failSend?: boolean } = {}) {
+function gmailMock(
+  options: {
+    raw?: string;
+    failSend?: boolean;
+  } = {},
+) {
   let sends = 0;
   global.fetch = async (input, init) => {
     const url = String(input);
@@ -148,7 +149,7 @@ function gmailMock(options: { raw?: string; failSend?: boolean } = {}) {
   };
   return () => sends;
 }
-test("private data requires same-origin mutations; credentials are encrypted", () => {
+test("private data requires same-origin mutations; credentials are encrypted", async () => {
   assert.throws(
     () =>
       security.assertSameOrigin(
@@ -168,10 +169,13 @@ test("private data requires same-origin mutations; credentials are encrypted", (
   const encrypted = security.encrypt({ token: "private-value" });
   assert.ok(!encrypted.includes("private-value"));
   assert.deepEqual(security.decrypt(encrypted), { token: "private-value" });
-  security.setPassword("a-long-test-password");
-  assert.equal(security.verifyPassword("a-long-test-password"), true);
-  assert.equal(security.verifyPassword("wrong"), false);
-  assert.throws(() => security.setPassword("a-different-password"), /already set up/);
+  await security.setPassword("a-long-test-password");
+  assert.equal(await security.verifyPassword("a-long-test-password"), true);
+  assert.equal(await security.verifyPassword("wrong"), false);
+  await assert.rejects(
+    async () => await security.setPassword("a-different-password"),
+    /already set up/,
+  );
 });
 test("ATS detection does not permit arbitrary fetch hosts or malicious slugs", () => {
   assert.deepEqual(inferBoard("https://jobs.ashbyhq.com/acme"), { source: "ashby", board: "acme" });
@@ -182,45 +186,45 @@ test("ATS detection does not permit arbitrary fetch hosts or malicious slugs", (
   assert.deepEqual(inferBoard("http://127.0.0.1/admin"), { source: "manual", board: "" });
   assert.deepEqual(inferBoard("https://jobs.ashbyhq.com/a%2Fb"), { source: "manual", board: "" });
 });
-test("matching waits for profile confirmation and flags remote eligibility gaps", () => {
-  const { p, job } = fixtures();
+test("matching waits for profile confirmation and flags remote eligibility gaps", async () => {
+  const { p, job } = await fixtures();
   assert.equal(matchJob(job, { ...p, confirmed: false }), null);
   const match = matchJob({ ...job, remote: false }, { ...p, remoteOnly: true })!;
   assert.ok(match.score <= 35);
   assert.ok(match.gaps.some((g) => g.includes("Remote")));
   assert.equal(match.method, "rules");
 });
-test("CSV imports deduplicate companies, keep contact unconfirmed, and reject bad headers", () => {
+test("CSV imports deduplicate companies, keep contact unconfirmed, and reject bad headers", async () => {
   const csv =
     "Company,Website,Careers URL,Recruitment email\nExample,https://example.com,https://jobs.ashbyhq.com/example,hr@example.com\n";
-  assert.equal(importCsv(csv).companies, 1);
-  assert.equal(importCsv(csv).companies, 0);
-  assert.equal(store.all<Company>("company")[0].contactConfirmed, false);
-  assert.throws(() => importCsv("Something,Else\na,b"), /column/);
+  assert.equal((await importCsv(csv)).companies, 1);
+  assert.equal((await importCsv(csv)).companies, 0);
+  assert.equal((await store.all<Company>("company"))[0].contactConfirmed, false);
+  await assert.rejects(async () => await importCsv("Something,Else\na,b"), /column/);
 });
 test("failed scans preserve listings and successful scans close only absent source jobs", async () => {
-  const { company, job } = fixtures();
-  store.put("company", { ...company, source: "ashby", board: "example" });
-  store.put("job", { ...job, source: "ashby" });
+  const { company, job } = await fixtures();
+  await store.put("company", { ...company, source: "ashby", board: "example" });
+  await store.put("job", { ...job, source: "ashby" });
   global.fetch = async () => new Response("Unavailable", { status: 503 });
   await assert.rejects(scanCompany(company.id));
-  assert.equal(store.get<Job>("job", job.id)?.status, "shortlisted");
+  assert.equal((await store.get<Job>("job", job.id))?.status, "shortlisted");
   global.fetch = async () => Response.json({ jobs: [] });
   await scanCompany(company.id);
-  assert.equal(store.get<Job>("job", job.id)?.status, "closed");
+  assert.equal((await store.get<Job>("job", job.id))?.status, "closed");
 });
 test("approval cannot be bypassed and approval rejects changes made in Gmail", async () => {
-  const { draft } = fixtures();
+  const { draft } = await fixtures();
   const sent = gmailMock({ raw: "changed-in-gmail" });
   await assert.rejects(sendDraft(draft.id), /approve/);
   await assert.rejects(approveDraft(draft.id, 1), /edited in Gmail/);
   assert.equal(sent(), 0);
 });
 test("editing any approved content invalidates approval and stale editors cannot overwrite", async () => {
-  const { draft } = fixtures();
+  const { draft } = await fixtures();
   gmailMock();
   await approveDraft(draft.id, 1);
-  assert.equal(store.get<Draft>("draft", draft.id)?.status, "approved");
+  assert.equal((await store.get<Draft>("draft", draft.id))?.status, "approved");
   await action("draft.save", {
     id: draft.id,
     version: 1,
@@ -229,7 +233,7 @@ test("editing any approved content invalidates approval and stale editors cannot
     body: draft.body,
     attachResume: false,
   });
-  const saved = store.get<Draft>("draft", draft.id)!;
+  const saved = (await store.get<Draft>("draft", draft.id))!;
   assert.equal(saved.approvedHash, null);
   assert.equal(saved.status, "draft");
   await assert.rejects(
@@ -245,38 +249,38 @@ test("editing any approved content invalidates approval and stale editors cannot
   );
 });
 test("concurrent send clicks produce one send and keep formal application status separate", async () => {
-  const { draft, job } = fixtures();
+  const { draft, job } = await fixtures();
   const sent = gmailMock();
   await approveDraft(draft.id, 1);
   const results = await Promise.allSettled([sendDraft(draft.id), sendDraft(draft.id)]);
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   assert.equal(sent(), 1);
-  assert.equal(store.get<Draft>("draft", draft.id)?.status, "sent");
-  assert.equal(store.get<Job>("job", job.id)?.applicationStatus, "not_submitted");
+  assert.equal((await store.get<Draft>("draft", draft.id))?.status, "sent");
+  assert.equal((await store.get<Job>("job", job.id))?.applicationStatus, "not_submitted");
   await assert.rejects(sendDraft(draft.id));
   assert.equal(sent(), 1);
 });
 test("ambiguous sends are held and cannot be retried", async () => {
-  const { draft } = fixtures();
+  const { draft } = await fixtures();
   const sent = gmailMock({ failSend: true });
   await approveDraft(draft.id, 1);
   await assert.rejects(sendDraft(draft.id), /could not be confirmed/);
-  assert.equal(store.get<Draft>("draft", draft.id)?.status, "uncertain");
+  assert.equal((await store.get<Draft>("draft", draft.id))?.status, "uncertain");
   await assert.rejects(sendDraft(draft.id));
   assert.equal(sent(), 1);
 });
 test("paused company schedules do not bypass a fresh vacancy check before sending", async () => {
-  const { draft, company, job } = fixtures();
+  const { draft, company, job } = await fixtures();
   gmailMock();
   await approveDraft(draft.id, 1);
-  store.put("company", {
+  await store.put("company", {
     ...company,
     source: "ashby",
     board: "example",
     paused: true,
     lastChecked: null,
   });
-  store.put("job", { ...job, source: "ashby" });
+  await store.put("job", { ...job, source: "ashby" });
   let sends = 0;
   global.fetch = async (input) => {
     if (String(input).includes("posting-api")) return Response.json({ jobs: [] });
@@ -287,13 +291,13 @@ test("paused company schedules do not bypass a fresh vacancy check before sendin
   assert.equal(sends, 0);
 });
 test("profile edits during the last Gmail check block sending", async () => {
-  const { draft, p } = fixtures();
+  const { draft, p } = await fixtures();
   gmailMock();
   await approveDraft(draft.id, 1);
   let sends = 0;
   global.fetch = async (input) => {
     if (String(input).includes("format=raw")) {
-      store.put("profile", { ...p, updatedAt: "changed-during-request" });
+      await store.put("profile", { ...p, updatedAt: "changed-during-request" });
       return Response.json({ message: { raw: "raw-v1" } });
     }
     sends++;
@@ -303,18 +307,18 @@ test("profile edits during the last Gmail check block sending", async () => {
   assert.equal(sends, 0);
 });
 test("paused sending and changed profiles block sending", async () => {
-  const { draft, p } = fixtures();
+  const { draft, p } = await fixtures();
   const sent = gmailMock();
   await approveDraft(draft.id, 1);
-  store.put("settings", { ...store.settings(), automationPaused: true });
+  await store.put("settings", { ...(await store.settings()), automationPaused: true });
   await assert.rejects(sendDraft(draft.id), /paused/);
-  store.put("settings", { ...store.settings(), automationPaused: false });
-  store.put("profile", { ...p, updatedAt: "2099-01-01T00:00:00Z" });
+  await store.put("settings", { ...(await store.settings()), automationPaused: false });
+  await store.put("profile", { ...p, updatedAt: "2099-01-01T00:00:00Z" });
   await assert.rejects(sendDraft(draft.id), /profile or the job changed/);
   assert.equal(sent(), 0);
 });
-test("header injection, missing promised attachments, and placeholders are blocked", () => {
-  const { draft } = fixtures();
+test("header injection, missing promised attachments, and placeholders are blocked", async () => {
+  const { draft } = await fixtures();
   assert.throws(() => validateDraft({ ...draft, subject: "Hello\nBcc: other@example.com" }));
   assert.throws(() =>
     validateDraft({ ...draft, body: "I’ve attached my résumé. Please consider my application." }),
@@ -343,32 +347,31 @@ test("OpenRouter enforces selected model and privacy controls and records actual
   };
   const result = await generate("test", z.object({ answer: z.string() }), "Test", {});
   assert.equal(result.value.answer, "ok");
-  const usage = store.all<import("../src/lib/types").Usage>("usage")[0];
+  const usage = (await store.all<import("../src/lib/types").Usage>("usage"))[0];
   assert.equal(usage.cost, 0.002);
   assert.equal(usage.providerIdHash?.length, 64);
   assert.ok(!JSON.stringify(usage).includes("raw-provider-id"));
   global.fetch = async () =>
     Response.json({ choices: [{ message: { content: '{"answer":"ok"}' } }] });
   await generate("test", z.object({ answer: z.string() }), "Test", {});
-  assert.equal(store.all<import("../src/lib/types").Usage>("usage")[0].cost, null);
+  assert.equal((await store.all<import("../src/lib/types").Usage>("usage"))[0].cost, null);
 });
 test("TXT and DOCX uploads extract text, keep original attachments, and require reconfirmation", async () => {
-  fixtures();
+  await fixtures();
   const text = "Test Candidate\nBuilt an API with Node.js and PostgreSQL.";
   const file = await uploadResume(new File([text], "resume.txt", { type: "text/plain" }));
-  assert.equal(readResume(file.id).buffer.toString(), text);
-  assert.equal(store.profile().confirmed, false);
+  assert.equal((await readResume(file.id)).buffer.toString(), text);
+  assert.equal((await store.profile()).confirmed, false);
   const archive = zipSync({
     "word/document.xml": strToU8(
       "<w:document><w:body><w:p><w:r><w:t>Test Candidate built a Node.js API with PostgreSQL.</w:t></w:r></w:p></w:body></w:document>",
     ),
   });
   await uploadResume(new File([new Uint8Array(archive)], "resume.docx"));
-  assert.match(store.profile().resumeText, /Node.js API/);
+  assert.match((await store.profile()).resumeText, /Node.js API/);
 });
-
-test("matching measures job skill coverage without penalizing unrelated candidate skills", () => {
-  const { p, job } = fixtures();
+test("matching measures job skill coverage without penalizing unrelated candidate skills", async () => {
+  const { p, job } = await fixtures();
   const original = matchJob(job, p)!;
   assert.equal(
     matchJob(job, { ...p, skills: [...p.skills, "Python", "Docker", "Figma"] })!.score,
@@ -381,9 +384,8 @@ test("matching measures job skill coverage without penalizing unrelated candidat
   assert.ok(moreRequirements.score < original.score);
   assert.match(moreRequirements.gaps.join(" "), /AWS, Kubernetes/);
 });
-
-test("skill aliases, duplicate skills, and punctuation do not create false keyword matches", () => {
-  const { p, job } = fixtures();
+test("skill aliases, duplicate skills, and punctuation do not create false keyword matches", async () => {
+  const { p, job } = await fixtures();
   const insights = jobInsights(
     { ...job, description: "Use NodeJS with Postgres, C++ and C#." },
     { ...p, skills: ["node.js", "Node.js", "PostgreSQL"] },
@@ -395,9 +397,8 @@ test("skill aliases, duplicate skills, and punctuation do not create false keywo
   assert.equal(mentions("ReactNative", "React"), false);
   assert.equal(mentions("We use C++, C# and .NET.", "C++"), true);
 });
-
-test("guidance selects relevant exact work examples and quotes requirements without inventing qualifications", () => {
-  const { p, job } = fixtures();
+test("guidance selects relevant exact work examples and quotes requirements without inventing qualifications", async () => {
+  const { p, job } = await fixtures();
   const insights = jobInsights(
     {
       ...job,
@@ -415,25 +416,23 @@ test("guidance selects relevant exact work examples and quotes requirements with
   assert.ok(insights.requirements.some((requirement) => requirement.includes("5+ years")));
   assert.match(insights.suggestions.join(" "), /only if you have that experience/);
 });
-
-test("an unrelated engineering role is not a preferred role match just because it says engineer", () => {
-  const { p, job } = fixtures();
+test("an unrelated engineering role is not a preferred role match just because it says engineer", async () => {
+  const { p, job } = await fixtures();
   const result = matchJob(
     { ...job, title: "Mechanical engineer" },
     { ...p, targetRoles: ["Backend engineer"] },
   )!;
   assert.ok(result.gaps.some((gap) => gap.includes("preferred roles")));
 });
-
 test("local email uses the role, company, confirmed evidence, and selected attachment without external requests", async () => {
-  const { draft, job, company, p } = fixtures();
+  const { draft, job, company, p } = await fixtures();
   let requests = 0;
   global.fetch = async () => {
     requests++;
     throw new Error("Local generation must not call a provider");
   };
   await action("draft.template", { id: draft.id, version: draft.version });
-  const generated = store.get<Draft>("draft", draft.id)!;
+  const generated = (await store.get<Draft>("draft", draft.id))!;
   assert.match(generated.subject, /Backend engineer/);
   assert.ok(generated.body.includes(company.name));
   assert.ok(generated.body.includes(p.experience));
@@ -446,39 +445,36 @@ test("local email uses the role, company, confirmed evidence, and selected attac
   assert.ok(!generated.body.includes("attached"));
   assert.match(localEmail(job, company, p, true).body, /attached my résumé/);
 });
-
 test("local drafting rejects stale editors, unconfirmed facts, closed jobs, and follow-ups", async () => {
-  const { p, draft, job } = fixtures();
+  const { p, draft, job } = await fixtures();
   await assert.rejects(action("draft.template", { id: draft.id, version: 99 }), /another tab/);
-  store.put("profile", { ...p, confirmed: false });
+  await store.put("profile", { ...p, confirmed: false });
   await assert.rejects(
     action("draft.template", { id: draft.id, version: 1 }),
     /Confirm your profile/,
   );
-  store.put("profile", p);
-  store.put("job", { ...job, status: "closed" });
+  await store.put("profile", p);
+  await store.put("job", { ...job, status: "closed" });
   await assert.rejects(action("draft.template", { id: draft.id, version: 1 }), /closed/);
-  store.put("job", job);
-  store.put("draft", { ...draft, followUpOf: store.id() });
+  await store.put("job", job);
+  await store.put("draft", { ...draft, followUpOf: store.id() });
   await assert.rejects(action("draft.template", { id: draft.id, version: 1 }), /follow-ups/);
-  assert.equal(store.get<Draft>("draft", draft.id)?.body, draft.body);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.body, draft.body);
 });
-
 test("local drafting cannot change sent, sending, or uncertain messages", async () => {
-  const { draft } = fixtures();
+  const { draft } = await fixtures();
   for (const status of ["sent", "sending", "uncertain"]) {
-    store.put("draft", { ...draft, status });
+    await store.put("draft", { ...draft, status });
     await assert.rejects(
       action("draft.template", { id: draft.id, version: 1 }),
       /cannot be edited/,
     );
-    assert.equal(store.get<Draft>("draft", draft.id)?.status, status);
-    assert.equal(store.get<Draft>("draft", draft.id)?.body, draft.body);
+    assert.equal((await store.get<Draft>("draft", draft.id))?.status, status);
+    assert.equal((await store.get<Draft>("draft", draft.id))?.body, draft.body);
   }
 });
-
-test("draft checks detect subject placeholders, missing attachments, malformed recipients, and header injection", () => {
-  const { draft } = fixtures();
+test("draft checks detect subject placeholders, missing attachments, malformed recipients, and header injection", async () => {
+  const { draft } = await fixtures();
   assert.equal(contentChecks(draft).filter((c) => c.status === "error").length, 0);
   for (const body of [
     "Please find my CV attached.",
@@ -503,9 +499,8 @@ test("draft checks detect subject placeholders, missing attachments, malformed r
     validateDraft({ ...draft, resumeId: "resume", body: "Please find my CV attached." }),
   );
 });
-
-test("application checks flag changed facts, missing contact confirmation, and resolved applications", () => {
-  const { draft, p, job, company } = fixtures();
+test("application checks flag changed facts, missing contact confirmation, and resolved applications", async () => {
+  const { draft, p, job, company } = await fixtures();
   assert.equal(
     applicationChecks(draft, p, job, company).filter((c) => c.status === "error").length,
     0,
@@ -521,9 +516,8 @@ test("application checks flag changed facts, missing contact confirmation, and r
     ["freshness", "contact", "resolved"],
   );
 });
-
 test("unconfirmed recruitment contacts and missing sources block approval on the server", async () => {
-  const { company, draft } = fixtures();
+  const { company, draft } = await fixtures();
   let requests = 0;
   global.fetch = async () => {
     requests++;
@@ -534,25 +528,23 @@ test("unconfirmed recruitment contacts and missing sources block approval on the
     { contactSource: "" },
     { email: "different@example.com" },
   ]) {
-    store.put("company", { ...company, ...changed });
+    await store.put("company", { ...company, ...changed });
     await assert.rejects(approveDraft(draft.id, draft.version), /Confirm this recruitment address/);
   }
   assert.equal(requests, 0);
-  assert.equal(store.get<Draft>("draft", draft.id)?.approvedHash, null);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.approvedHash, null);
 });
-
 test("contact changes after approval prevent sending", async () => {
-  const { company, draft } = fixtures();
+  const { company, draft } = await fixtures();
   const sends = gmailMock();
   await approveDraft(draft.id, draft.version);
-  store.put("company", { ...company, contactConfirmed: false });
+  await store.put("company", { ...company, contactConfirmed: false });
   await assert.rejects(sendDraft(draft.id), /Confirm this recruitment address/);
   assert.equal(sends(), 0);
 });
-
 test("manual changes clear generated evidence rather than attributing new claims to old quotes", async () => {
-  const { draft } = fixtures();
-  store.put("draft", { ...draft, evidence: ["Old claim and quote"], model: "test/model" });
+  const { draft } = await fixtures();
+  await store.put("draft", { ...draft, evidence: ["Old claim and quote"], model: "test/model" });
   await action("draft.save", {
     id: draft.id,
     version: 1,
@@ -561,12 +553,11 @@ test("manual changes clear generated evidence rather than attributing new claims
     body: `${draft.body}\nI am available for a call.`,
     attachResume: false,
   });
-  const saved = store.get<Draft>("draft", draft.id)!;
+  const saved = (await store.get<Draft>("draft", draft.id))!;
   assert.deepEqual(saved.evidence, []);
   assert.equal(saved.model, "Manual");
   assert.match(saved.reviewNotes.join(" "), /edited manually/);
 });
-
 function aiEmailResponse(
   quote: string,
   body = "Hi Hiring Team,\n\nI built a Node.js API with PostgreSQL and would welcome a conversation about this role.\n\nBest regards,\nTest Candidate",
@@ -587,12 +578,15 @@ function aiEmailResponse(
     ],
   });
 }
-
 test("AI receives the job, profile, bounded writing brief, and actual attachment choice", async () => {
-  const { draft, p, job } = fixtures();
+  const { draft, p, job } = await fixtures();
   process.env.OPENROUTER_API_KEY = "test-key";
   process.env.OPENROUTER_MODEL = "test/model";
-  store.put("profile", { ...p, resumeId: "available-but-not-selected", resumeName: "resume.pdf" });
+  await store.put("profile", {
+    ...p,
+    resumeId: "available-but-not-selected",
+    resumeName: "resume.pdf",
+  });
   let called = false;
   global.fetch = async (_url, init) => {
     called = true;
@@ -612,32 +606,30 @@ test("AI receives the job, profile, bounded writing brief, and actual attachment
     style: "Focus on my API project; keep it concise.",
   });
   assert.equal(called, true);
-  assert.equal(store.get<Draft>("draft", draft.id)?.resumeId, "");
-  assert.equal(store.get<Draft>("draft", draft.id)?.model, "test/model");
+  assert.equal((await store.get<Draft>("draft", draft.id))?.resumeId, "");
+  assert.equal((await store.get<Draft>("draft", draft.id))?.model, "test/model");
   assert.equal(
-    store.get<Draft>("draft", draft.id)?.writingInstructions,
+    (await store.get<Draft>("draft", draft.id))?.writingInstructions,
     "Focus on my API project; keep it concise.",
   );
 });
-
 test("invalid AI evidence and missing promised attachments leave the previous email untouched", async () => {
-  const { draft, p, company, job } = fixtures();
+  const { draft, p, company, job } = await fixtures();
   process.env.OPENROUTER_API_KEY = "test-key";
   process.env.OPENROUTER_MODEL = "test/model";
   global.fetch = async () => aiEmailResponse("Managed a team of 50 engineers.");
   await assert.rejects(action("draft.generate", { id: draft.id, version: 1 }), /valid evidence/);
-  assert.equal(store.get<Draft>("draft", draft.id)?.body, draft.body);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.body, draft.body);
   global.fetch = async () =>
     aiEmailResponse(
       p.experience,
       "I built a Node.js API with PostgreSQL. Please find my CV attached.",
     );
   await assert.rejects(writeEmail(job, company, undefined, undefined, false), /attachment/);
-  assert.equal(store.get<Draft>("draft", draft.id)?.version, 1);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.version, 1);
 });
-
 test("AI generation rejects stale versions and oversized instructions before making a paid request", async () => {
-  const { draft } = fixtures();
+  const { draft } = await fixtures();
   let requests = 0;
   global.fetch = async () => {
     requests++;
@@ -649,27 +641,25 @@ test("AI generation rejects stale versions and oversized instructions before mak
   );
   assert.equal(requests, 0);
 });
-
-test("profile validation rejects blank skills and normalizes case-insensitive duplicates", () => {
-  const { p } = fixtures();
+test("profile validation rejects blank skills and normalizes case-insensitive duplicates", async () => {
+  const { p } = await fixtures();
   assert.equal(profileSchema.safeParse({ ...p, skills: ["   "] }).success, false);
   assert.deepEqual(
     profileSchema.parse({ ...p, skills: ["Node.js", " node.js ", "PostgreSQL"] }).skills,
     ["Node.js", "PostgreSQL"],
   );
 });
-
 test("an empty stale draft can still be written from current profile facts while approval stays blocked", async () => {
-  const { draft, p } = fixtures();
-  store.put("draft", { ...draft, body: "", status: "draft" });
-  store.put("profile", {
+  const { draft, p } = await fixtures();
+  await store.put("draft", { ...draft, body: "", status: "draft" });
+  await store.put("profile", {
     ...p,
     updatedAt: "changed-profile",
     experience: "Built a Node.js API for scheduling interviews.",
   });
   const markup = renderToStaticMarkup(
     createElement(EmailPanel, {
-      data: state(),
+      data: await state(),
       selectedId: draft.id,
       setSelectedId: () => {},
       act: async () => null,
@@ -684,7 +674,7 @@ test("an empty stale draft can still be written from current profile facts while
   const approve = buttons.find((button) => button[2].includes("Approve this draft"));
   assert.ok(approve?.[1].includes("disabled"), "Stale content cannot be approved");
   await action("draft.template", { id: draft.id, version: 1 });
-  const generated = store.get<Draft>("draft", draft.id)!;
+  const generated = (await store.get<Draft>("draft", draft.id))!;
   assert.match(generated.body, /scheduling interviews/);
   assert.equal(generated.profileUpdatedAt, "changed-profile");
 });

@@ -1,96 +1,184 @@
-import Database from "better-sqlite3";
-import { mkdirSync, chmodSync } from "node:fs";
-import path from "node:path";
+import { Pool as NeonPool, neonConfig } from "@neondatabase/serverless";
+import WebSocket from "ws";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import {
-  emptyProfile,
-  defaultSettings,
-  type Activity,
-  type Profile,
-  type Settings,
-  type Task,
-} from "./types";
+import { Pool, type QueryResultRow } from "pg";
+import { emptyProfile, defaultSettings, type Activity, type Task } from "./types";
 
-export const dataDir = path.resolve(/* turbopackIgnore: true */ process.env.DATA_DIR || "./data");
-let singleton: Database.Database | undefined;
-export function db() {
-  if (singleton) return singleton;
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  singleton = new Database(path.join(dataDir, "folio.sqlite"));
-  chmodSync(path.join(dataDir, "folio.sqlite"), 0o600);
-  singleton.pragma("journal_mode = WAL");
-  singleton.pragma("busy_timeout = 5000");
-  singleton.exec(`CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(kind,id));
-    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, type TEXT NOT NULL, targetId TEXT NOT NULL, status TEXT NOT NULL, error TEXT, createdAt TEXT NOT NULL, startedAt TEXT, finishedAt TEXT);
-    CREATE UNIQUE INDEX IF NOT EXISTS active_task ON tasks(type,targetId) WHERE status IN ('pending','running');`);
-  return singleton;
+interface SqlConnection {
+  query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
 }
-export function get<T>(kind: string, id: string): T | null {
-  const row = db().prepare("SELECT data FROM records WHERE kind=? AND id=?").get(kind, id) as
-    { data: string } | undefined;
-  return row ? (JSON.parse(row.data) as T) : null;
+interface SqlClient extends SqlConnection { release(): void; }
+interface SqlPool extends SqlConnection {
+  connect(): Promise<SqlClient>;
+  end(): Promise<void>;
+  on(event: "error", listener: () => void): unknown;
 }
-export function all<T>(kind: string): T[] {
-  return (
-    db().prepare("SELECT data FROM records WHERE kind=? ORDER BY rowid DESC").all(kind) as {
-      data: string;
-    }[]
-  ).map((r) => JSON.parse(r.data) as T);
+let pool: SqlPool | undefined;
+let initialized: Promise<void> | undefined;
+const current = new AsyncLocalStorage<SqlClient>();
+// All short read-modify-write transactions and standalone writes share this lock.
+// Preserve the single-owner app's SQLite BEGIN IMMEDIATE guarantees across instances.
+const writeLock = 714026153;
+function connectionPool() {
+  if (!process.env.DATABASE_URL)
+    throw new Error("Set DATABASE_URL to your Neon Postgres connection string.");
+  if (!pool) {
+    const url = new URL(process.env.DATABASE_URL);
+    if (url.searchParams.get("sslmode") === "require") url.searchParams.set("sslmode", "verify-full");
+    neonConfig.webSocketConstructor = WebSocket;
+    const Driver = url.hostname.endsWith(".neon.tech") ? NeonPool : Pool;
+    pool = new Driver({
+      connectionString: url.toString(),
+      max: 3,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 15000,
+      allowExitOnIdle: true,
+    });
+    pool.on("error", () => console.error("[database] An idle connection failed."));
+  }
+  return pool;
 }
-export function put<T extends { id: string }>(kind: string, value: T): T {
-  db()
-    .prepare(
-      "INSERT INTO records(kind,id,data) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
-    )
-    .run(kind, value.id, JSON.stringify(value));
-  return value;
+export async function initializeDatabase() {
+  if (!initialized) {
+    initialized = (async () => {
+      const client = await connectionPool().connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock($1)", [writeLock]);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS folio_records (
+            sequence BIGSERIAL UNIQUE, kind TEXT NOT NULL, id TEXT NOT NULL,
+            data JSONB NOT NULL, PRIMARY KEY (kind, id));
+          CREATE INDEX IF NOT EXISTS folio_records_kind_sequence ON folio_records(kind, sequence DESC);
+          CREATE TABLE IF NOT EXISTS folio_tasks (
+            id TEXT PRIMARY KEY, type TEXT NOT NULL, "targetId" TEXT NOT NULL,
+            status TEXT NOT NULL, error TEXT, "createdAt" TEXT NOT NULL,
+            "startedAt" TEXT, "finishedAt" TEXT);
+          CREATE UNIQUE INDEX IF NOT EXISTS folio_active_task
+            ON folio_tasks(type, "targetId") WHERE status IN ('pending', 'running');
+        `);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+    })().catch((error) => {
+      initialized = undefined;
+      throw error;
+    });
+  }
+  await initialized;
 }
-export function remove(kind: string, id: string) {
-  db().prepare("DELETE FROM records WHERE kind=? AND id=?").run(kind, id);
+export async function query<T extends QueryResultRow = QueryResultRow>(
+  sql: string,
+  values: unknown[] = [],
+) {
+  await initializeDatabase();
+  return (current.getStore() || connectionPool()).query<T>(sql, values);
 }
-export function transaction<T>(fn: () => T): T {
-  return db().transaction(fn).immediate();
+export async function transaction<T>(fn: () => Promise<T>): Promise<T> {
+  if (current.getStore()) return fn();
+  await initializeDatabase();
+  const client = await connectionPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL lock_timeout = '15s'");
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '30s'");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [writeLock]);
+    const result = await current.run(client, fn);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+export async function get<T>(kind: string, id: string): Promise<T | null> {
+  const result = await query<{ data: T }>(
+    "SELECT data FROM folio_records WHERE kind=$1 AND id=$2",
+    [kind, id],
+  );
+  return result.rows[0]?.data ?? null;
+}
+export async function all<T>(kind: string): Promise<T[]> {
+  const result = await query<{ data: T }>(
+    "SELECT data FROM folio_records WHERE kind=$1 ORDER BY sequence DESC",
+    [kind],
+  );
+  return result.rows.map((row) => row.data);
+}
+export async function put<T extends { id: string }>(kind: string, value: T): Promise<T> {
+  return transaction(async () => {
+    await query(
+      "INSERT INTO folio_records(kind,id,data) VALUES($1,$2,$3::jsonb) ON CONFLICT(kind,id) DO UPDATE SET data=EXCLUDED.data",
+      [kind, value.id, JSON.stringify(value)],
+    );
+    return value;
+  });
+}
+export async function remove(kind: string, id: string) {
+  await transaction(async () => {
+    await query("DELETE FROM folio_records WHERE kind=$1 AND id=$2", [kind, id]);
+  });
 }
 export const now = () => new Date().toISOString();
 export const id = () => randomUUID();
-export const profile = () => get<Profile>("profile", "main") || { ...emptyProfile };
-export const settings = () => get<Settings>("settings", "main") || { ...defaultSettings };
-export function activity(label: string, detail: string, kind: Activity["kind"] = "info") {
-  put("activity", { id: id(), label, detail, kind, createdAt: now() });
+export const profile = async () =>
+  (await get<typeof emptyProfile>("profile", "main")) || { ...emptyProfile };
+export const settings = async () =>
+  (await get<typeof defaultSettings>("settings", "main")) || { ...defaultSettings };
+export async function activity(label: string, detail: string, kind: Activity["kind"] = "info") {
+  await put("activity", { id: id(), label, detail, kind, createdAt: now() });
 }
-export function enqueue(type: Task["type"], targetId: string) {
-  const task: Task = {
-    id: id(),
-    type,
-    targetId,
-    status: "pending",
-    error: null,
-    createdAt: now(),
-    startedAt: null,
-    finishedAt: null,
-  };
-  db()
-    .prepare(
-      "INSERT OR IGNORE INTO tasks(id,type,targetId,status,createdAt) VALUES(@id,@type,@targetId,@status,@createdAt)",
-    )
-    .run(task);
-  return task;
-}
-export function claimTask(): Task | null {
-  return transaction(() => {
-    const task = db()
-      .prepare("SELECT * FROM tasks WHERE status='pending' ORDER BY createdAt LIMIT 1")
-      .get() as Task | undefined;
-    if (!task) return null;
-    db().prepare("UPDATE tasks SET status='running',startedAt=? WHERE id=?").run(now(), task.id);
+export async function enqueue(type: Task["type"], targetId: string) {
+  return transaction(async () => {
+    const task: Task = {
+      id: id(),
+      type,
+      targetId,
+      status: "pending",
+      error: null,
+      createdAt: now(),
+      startedAt: null,
+      finishedAt: null,
+    };
+    await query(
+      `INSERT INTO folio_tasks(id,type,"targetId",status,"createdAt") VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      [task.id, type, targetId, task.status, task.createdAt],
+    );
     return task;
   });
 }
-export function tasks(): Task[] {
-  return db().prepare("SELECT * FROM tasks ORDER BY createdAt DESC LIMIT 100").all() as Task[];
+export async function claimTask(): Promise<Task | null> {
+  return transaction(async () => {
+    const result = await query<Task>(
+      `UPDATE folio_tasks SET status='running', "startedAt"=$1
+      WHERE id=(SELECT id FROM folio_tasks WHERE status='pending' ORDER BY "createdAt" LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`,
+      [now()],
+    );
+    return result.rows[0] || null;
+  });
 }
-export function finishTask(taskId: string, error?: string) {
-  db()
-    .prepare("UPDATE tasks SET status=?,error=?,finishedAt=? WHERE id=?")
-    .run(error ? "failed" : "done", error || null, now(), taskId);
+export async function tasks(): Promise<Task[]> {
+  return (await query<Task>('SELECT * FROM folio_tasks ORDER BY "createdAt" DESC LIMIT 100')).rows;
+}
+export async function finishTask(taskId: string, error?: string) {
+  await transaction(async () => {
+    await query(`UPDATE folio_tasks SET status=$1,error=$2,"finishedAt"=$3 WHERE id=$4`, [
+      error ? "failed" : "done",
+      error || null,
+      now(),
+      taskId,
+    ]);
+  });
+}
+export async function closeDatabase() {
+  await pool?.end();
+  pool = undefined;
+  initialized = undefined;
 }

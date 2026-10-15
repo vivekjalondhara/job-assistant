@@ -2,8 +2,10 @@ import { all, get, put, id, now, profile, activity, transaction } from "./db";
 import { AppError } from "./security";
 import { matchJob } from "./matching";
 import type { Company, Job, Source } from "./types";
-
-export function inferBoard(value: string): { source: Source; board: string } {
+export function inferBoard(value: string): {
+  source: Source;
+  board: string;
+} {
   try {
     const u = new URL(value);
     const bits = u.pathname.split("/").filter(Boolean);
@@ -73,10 +75,10 @@ type Listing = {
   salary: string;
 };
 export async function scanCompany(companyId: string, verifyBeforeSend = false) {
-  const company = get<Company>("company", companyId);
+  const company = await get<Company>("company", companyId);
   if (!company || (company.paused && !verifyBeforeSend)) return;
   if (company.source === "manual") {
-    put("company", {
+    await put("company", {
       ...company,
       checkStatus: "manual",
       checkNote: "Add jobs manually or provide an Ashby, Greenhouse, or Lever careers URL.",
@@ -165,13 +167,13 @@ export async function scanCompany(companyId: string, verifyBeforeSend = false) {
         "The job feed contains incomplete records. Existing jobs were preserved.",
         502,
       );
-    const existing = all<Job>("job").filter((j) => j.companyId === company.id);
+    const existing = (await all<Job>("job")).filter((j) => j.companyId === company.id);
     const seen = new Set<string>();
     let added = 0;
-    const p = profile();
+    const p = await profile();
     const timestamp = now();
-    transaction(() => {
-      const currentCompany = get<Company>("company", company.id);
+    await transaction(async () => {
+      const currentCompany = await get<Company>("company", company.id);
       if (
         !currentCompany ||
         currentCompany.source !== company.source ||
@@ -200,29 +202,38 @@ export async function scanCompany(companyId: string, verifyBeforeSend = false) {
         };
         job.match =
           !changed && prev?.match?.profileUpdatedAt === p.updatedAt ? prev.match : matchJob(job, p);
-        put("job", job);
+        await put("job", job);
         if (!prev) added++;
       }
       for (const old of existing) {
         if (old.source === company.source && !seen.has(old.sourceId))
-          put("job", { ...old, status: "closed", checkedAt: timestamp, updatedAt: timestamp });
+          await put("job", {
+            ...old,
+            status: "closed",
+            checkedAt: timestamp,
+            updatedAt: timestamp,
+          });
       }
-      const latest = get<Company>("company", company.id)!;
-      put("company", {
+      const latest = (await get<Company>("company", company.id))!;
+      await put("company", {
         ...latest,
         lastChecked: timestamp,
         checkStatus: "success",
         checkNote: `${listings.length} open roles checked. ${added} new.`,
       });
     });
-    activity(`Checked ${company.name}`, `${listings.length} open roles · ${added} new`, "success");
+    await activity(
+      `Checked ${company.name}`,
+      `${listings.length} open roles · ${added} new`,
+      "success",
+    );
   } catch (error) {
     const message =
       error instanceof AppError
         ? error.message
         : "Could not reach the job source. Existing jobs were preserved.";
-    const latest = get<Company>("company", company.id)!;
-    put("company", { ...latest, checkStatus: "failed", checkNote: message });
+    const latest = (await get<Company>("company", company.id))!;
+    await put("company", { ...latest, checkStatus: "failed", checkNote: message });
     throw new AppError(message, 502);
   }
 }

@@ -1,10 +1,17 @@
 import { requireAuth, AppError } from "@/lib/security";
 import { readResume } from "@/lib/files";
-export async function GET(_req: Request, context: { params: Promise<{ id: string }> }) {
+export async function GET(
+  _req: Request,
+  context: {
+    params: Promise<{
+      id: string;
+    }>;
+  },
+) {
   try {
     await requireAuth();
     const { id } = await context.params;
-    const file = readResume(id);
+    const file = await readResume(id);
     return new Response(new Uint8Array(file.buffer), {
       headers: {
         "Content-Type": file.meta.mime,

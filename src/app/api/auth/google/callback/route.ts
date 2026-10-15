@@ -11,11 +11,13 @@ export async function GET(req: Request) {
     const jar = await cookies();
     if (!state || state !== jar.get("folio_oauth")?.value)
       throw new AppError("Google authorization was cancelled or expired.");
-    transaction(() => {
-      const pending = get<{ expires: number }>("oauth", digest(state));
+    await transaction(async () => {
+      const pending = await get<{
+        expires: number;
+      }>("oauth", digest(state));
       if (!pending || pending.expires < Date.now())
         throw new AppError("Google authorization expired. Try again.");
-      remove("oauth", digest(state));
+      await remove("oauth", digest(state));
     });
     jar.set("folio_oauth", "", {
       httpOnly: true,

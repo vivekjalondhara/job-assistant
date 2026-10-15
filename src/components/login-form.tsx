@@ -17,7 +17,10 @@ export default function LoginForm({ setup }: { setup: boolean }) {
       const r = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: form.get("password") }),
+        body: JSON.stringify({
+          password: form.get("password"),
+          setupToken: form.get("setupToken"),
+        }),
       });
       const result = await r.json();
       if (!r.ok) throw new Error(result.error);
@@ -75,17 +78,29 @@ export default function LoginForm({ setup }: { setup: boolean }) {
               />
             </label>
             {setup && (
-              <label>
-                Confirm password
-                <input
-                  name="confirm"
-                  type="password"
-                  minLength={12}
-                  autoComplete="new-password"
-                  required
-                  placeholder="Enter it once more"
-                />
-              </label>
+              <>
+                <label>
+                  Confirm password
+                  <input
+                    name="confirm"
+                    type="password"
+                    minLength={12}
+                    autoComplete="new-password"
+                    required
+                    placeholder="Enter it once more"
+                  />
+                </label>
+                <label>
+                  Workspace setup token
+                  <input
+                    name="setupToken"
+                    type="password"
+                    autoComplete="off"
+                    required
+                    placeholder="Token from your server configuration"
+                  />
+                </label>
+              </>
             )}
             {error && (
               <div className="notice error" role="alert">

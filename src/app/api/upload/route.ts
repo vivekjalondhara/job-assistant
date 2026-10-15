@@ -6,14 +6,14 @@ export async function POST(req: Request) {
   try {
     assertSameOrigin(req);
     await requireAuth();
-    if (Number(req.headers.get("content-length") || 0) > 9000000)
+    if (Number(req.headers.get("content-length") || 0) > 4400000)
       throw new AppError("File too large.", 413);
     const form = await req.formData();
     const file = form.get("file");
     if (!(file instanceof File)) throw new AppError("Choose a file.");
-    if (file.size > 8000000) throw new AppError("File too large.", 413);
+    if (file.size > 4 * 1024 * 1024) throw new AppError("File too large.", 413);
     if (form.get("type") === "csv") {
-      const result = importCsv(await file.text());
+      const result = await importCsv(await file.text());
       return Response.json({ message: `Imported ${result.companies} companies.` });
     }
     await uploadResume(file);
