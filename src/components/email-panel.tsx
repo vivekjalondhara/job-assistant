@@ -13,11 +13,12 @@ import {
   FileCheck2,
   Copy,
   Download,
+  Plus,
 } from "lucide-react";
 import type { AppState, Draft, EnglishSuggestion } from "@/lib/types";
 import type { Act } from "./workspace";
 import { Badge, Button, Empty, External, label, relative, allowNavigation } from "./ui";
-import { applicationChecks, contentChecks } from "@/lib/email-checks";
+import { applicationChecks, contentChecks, draftInputsChanged } from "@/lib/email-checks";
 import { EmailPreview } from "./email-preview";
 
 export function EmailPanel({
@@ -43,20 +44,38 @@ export function EmailPanel({
     )
     .sort((a, b) => (b.sentAt || b.updatedAt).localeCompare(a.sentAt || a.updatedAt));
   const draft = emails.find((d) => d.id === selectedId) || emails[0];
+  async function newEmail() {
+    if (!allowNavigation()) return;
+    const result = await act("draft.direct");
+    if (result?.draftId) {
+      setFolder("all");
+      setSelectedId(result.draftId);
+    }
+  }
   return (
     <>
       <div className="page-heading">
         <div>
           <span className="eyebrow">A GOOD FIRST IMPRESSION</span>
           <h1>Your experience. In your words.</h1>
-          <p>Write in clear English, preview your message, and read your sent applications.</p>
+          <p>Write directly to an email address or prepare an application from a job.</p>
         </div>
-        <Badge tone="green">
-          <ShieldCheck size={13} /> Approval before sending
-        </Badge>
+        <div className="button-row">
+          <Badge tone="green">
+            <ShieldCheck size={13} /> Approval before sending
+          </Badge>
+          <Button
+            variant="primary"
+            disabled={!!busy}
+            busy={busy === "draft.direct"}
+            onClick={newEmail}
+          >
+            <Plus size={16} /> New email
+          </Button>
+        </div>
       </div>
       <div className="email-folders">
-        <div className="tabs" aria-label="Filter application emails">
+        <div className="tabs" aria-label="Filter emails">
           {(
             [
               ["all", "All emails", data.drafts.length],
@@ -76,13 +95,13 @@ export function EmailPanel({
             </button>
           ))}
         </div>
-        <p className="small muted">Sent shows application emails sent through Folio.</p>
+        <p className="small muted">Sent shows emails sent through Folio.</p>
       </div>
       {!data.drafts.length ? (
         <div className="panel">
           <Empty
             title="Start a conversation worth having"
-            description="Open a job and choose “Prepare email”. Your tailored application will be ready to review here."
+            description="Choose “New email” to enter a recipient and write your message. No company or job is required. You can also prepare an application from a job."
           >
             <Button variant="primary" onClick={onFindJobs}>
               Find an opportunity <ArrowUpRight size={15} />
@@ -95,14 +114,14 @@ export function EmailPanel({
             title={folder === "sent" ? "No sent emails yet" : "No drafts waiting"}
             description={
               folder === "sent"
-                ? "After you review, approve, and send an application, its message and attachment details will appear here."
-                : "Prepare an email from a job to start your next application."
+                ? "After you review, approve, and send an email, its message and attachment details will appear here."
+                : "Choose “New email” or prepare an application from a job."
             }
           />
         </div>
       ) : (
         <div className="email-layout">
-          <aside className="email-list" aria-label="Application emails">
+          <aside className="email-list" aria-label="Emails">
             <div className="email-list-heading">
               <strong>Your emails</strong>
               <Badge>{emails.length}</Badge>
@@ -119,10 +138,10 @@ export function EmailPanel({
                   }}
                 >
                   <span className="email-item-top">
-                    <strong>{company?.name}</strong>
+                    <strong>{d.kind === "direct" ? d.to || "New email" : company?.name}</strong>
                     <span className={`email-state-dot ${d.status}`} />
                   </span>
-                  <span>{job?.title}</span>
+                  <span>{d.kind === "direct" ? d.subject || "No subject yet" : job?.title}</span>
                   <small>
                     {d.followUpOf ? "Follow-up · " : ""}
                     {label(d.status)} · {relative(d.sentAt || d.updatedAt)}
@@ -167,9 +186,9 @@ function Composer({
     [suggestion, setSuggestion] = useState<EnglishSuggestion | null>(null);
   const company = data.companies.find((c) => c.id === draft.companyId),
     job = data.jobs.find((j) => j.id === draft.jobId);
+  const direct = draft.kind === "direct";
   const locked = ["sent", "sending", "uncertain"].includes(draft.status);
-  const inputsChanged =
-    draft.profileUpdatedAt !== data.profile.updatedAt || draft.jobUpdatedAt !== job?.updatedAt;
+  const inputsChanged = draftInputsChanged(draft, data.profile, job);
   const edited =
     !locked &&
     (to !== draft.to ||
@@ -212,7 +231,7 @@ function Composer({
     const url = URL.createObjectURL(new Blob([exportText], { type: "text/plain;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = "application-email.txt";
+    link.download = direct ? "email.txt" : "application-email.txt";
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     setExportNotice("Email downloaded. Attach your résumé separately when sending elsewhere.");
@@ -246,7 +265,8 @@ function Composer({
       <section className="composer panel">
         <div className="composer-heading">
           <span>
-            <Mail size={17} /> {draft.followUpOf ? "Follow-up email" : "Application email"}
+            <Mail size={17} />{" "}
+            {draft.followUpOf ? "Follow-up email" : direct ? "Direct email" : "Application email"}
           </span>
           <Badge
             tone={
@@ -294,7 +314,10 @@ function Composer({
                   setReviewed(false);
                   setSuggestion(null);
                 }}
-                placeholder="Add a verified recruitment address"
+                placeholder={
+                  direct ? "recipient@example.com" : "Add a verified recruitment address"
+                }
+                autoFocus={direct && !draft.to}
               />
             </label>
             <label className="compose-field">
@@ -320,7 +343,11 @@ function Composer({
                 setReviewed(false);
                 setSuggestion(null);
               }}
-              placeholder="Write your introduction, use your confirmed profile to draft locally, or ask AI to tailor it."
+              placeholder={
+                direct
+                  ? "Write your message here."
+                  : "Write your introduction, use your confirmed profile to draft locally, or ask AI to tailor it."
+              }
             />
             <div className="compose-bottom">
               <label className="check-row">
@@ -350,27 +377,31 @@ function Composer({
           <div className="writing-tools">
             {inputsChanged && (
               <p className="small notice amber">
-                Your profile or this job changed. Review the email and current résumé, then save
-                your edits, or regenerate from the current profile before continuing.
+                {direct
+                  ? "Your profile or résumé changed. Review the attachment and save your edits before continuing."
+                  : "Your profile or this job changed. Review the email and current résumé, then save your edits, or regenerate from the current profile before continuing."}
               </p>
             )}
             <span className="small muted">
               <Sparkles size={14} /> Writing assistant
             </span>
-            <label className="writing-brief">
-              <span>Writing instructions for AI drafts (optional)</span>
-              <textarea
-                value={instructions}
-                onChange={(event) => setInstructions(event.target.value)}
-                maxLength={1000}
-                rows={3}
-                disabled={!!busy || !!draft.followUpOf}
-                placeholder="For example: Keep it under 120 words. Focus on my API project. Use a concise, friendly tone."
-              />
-            </label>
+            {!direct && (
+              <label className="writing-brief">
+                <span>Writing instructions for AI drafts (optional)</span>
+                <textarea
+                  value={instructions}
+                  onChange={(event) => setInstructions(event.target.value)}
+                  maxLength={1000}
+                  rows={3}
+                  disabled={!!busy || !!draft.followUpOf}
+                  placeholder="For example: Keep it under 120 words. Focus on my API project. Use a concise, friendly tone."
+                />
+              </label>
+            )}
             <p className="small muted">
-              Draft generation uses your saved job and confirmed profile. Improve English edits the
-              saved email. Review every factual claim before sending.
+              {direct
+                ? "Write your message and save it. Improve English can help with grammar and phrasing."
+                : "Draft generation uses your saved job and confirmed profile. Improve English edits the saved email. Review every factual claim before sending."}
             </p>
             <div className="button-row">
               <Button
@@ -393,76 +424,89 @@ function Composer({
               >
                 <Sparkles size={14} /> Improve English
               </Button>
-              <Button
-                variant="ghost"
-                disabled={
-                  !!busy ||
-                  edited ||
-                  !data.profile.confirmed ||
-                  !!draft.followUpOf ||
-                  job?.status === "closed"
-                }
-                busy={busy === "draft.template"}
-                onClick={() => {
-                  if (
-                    !body.trim() ||
-                    window.confirm("Replace this saved email with a new draft from your profile?")
-                  )
-                    act("draft.template", { id: draft.id, version: draft.version });
-                }}
-              >
-                Write from my profile
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={
-                  !!busy ||
-                  edited ||
-                  !data.connections.openrouter ||
-                  !data.profile.confirmed ||
-                  !!draft.followUpOf ||
-                  job?.status === "closed"
-                }
-                busy={busy === "draft.generate"}
-                onClick={() => {
-                  if (!body.trim() || window.confirm("Replace this saved email with an AI draft?"))
-                    act("draft.generate", {
-                      id: draft.id,
-                      version: draft.version,
-                      style: instructions,
-                    });
-                }}
-              >
-                {body ? "Rewrite with AI" : "Generate with AI"}
-              </Button>
-              {body && (
+              {!direct && (
                 <>
                   <Button
                     variant="ghost"
-                    disabled={!!busy || dirty || !data.connections.openrouter || !!draft.followUpOf}
-                    onClick={() =>
-                      act("draft.generate", {
-                        id: draft.id,
-                        version: draft.version,
-                        style: `${instructions.slice(0, 850)}\nMake it shorter, around 90 words.`,
-                      })
+                    disabled={
+                      !!busy ||
+                      edited ||
+                      !data.profile.confirmed ||
+                      !!draft.followUpOf ||
+                      job?.status === "closed"
                     }
+                    busy={busy === "draft.template"}
+                    onClick={() => {
+                      if (
+                        !body.trim() ||
+                        window.confirm(
+                          "Replace this saved email with a new draft from your profile?",
+                        )
+                      )
+                        act("draft.template", { id: draft.id, version: draft.version });
+                    }}
                   >
-                    Make shorter
+                    Write from my profile
                   </Button>
                   <Button
                     variant="ghost"
-                    disabled={!!busy || dirty || !data.connections.openrouter || !!draft.followUpOf}
-                    onClick={() =>
-                      act("draft.generate", {
-                        id: draft.id,
-                        version: draft.version,
-                        style: `${instructions.slice(0, 850)}\nMake the wording sound more natural and conversational, while staying professional.`,
-                      })
+                    disabled={
+                      !!busy ||
+                      edited ||
+                      !data.connections.openrouter ||
+                      !data.profile.confirmed ||
+                      !!draft.followUpOf ||
+                      job?.status === "closed"
                     }
+                    busy={busy === "draft.generate"}
+                    onClick={() => {
+                      if (
+                        !body.trim() ||
+                        window.confirm("Replace this saved email with an AI draft?")
+                      )
+                        act("draft.generate", {
+                          id: draft.id,
+                          version: draft.version,
+                          style: instructions,
+                        });
+                    }}
                   >
-                    More natural
+                    {body ? "Rewrite with AI" : "Generate with AI"}
                   </Button>
+                  {body && (
+                    <>
+                      <Button
+                        variant="ghost"
+                        disabled={
+                          !!busy || dirty || !data.connections.openrouter || !!draft.followUpOf
+                        }
+                        onClick={() =>
+                          act("draft.generate", {
+                            id: draft.id,
+                            version: draft.version,
+                            style: `${instructions.slice(0, 850)}\nMake it shorter, around 90 words.`,
+                          })
+                        }
+                      >
+                        Make shorter
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={
+                          !!busy || dirty || !data.connections.openrouter || !!draft.followUpOf
+                        }
+                        onClick={() =>
+                          act("draft.generate", {
+                            id: draft.id,
+                            version: draft.version,
+                            style: `${instructions.slice(0, 850)}\nMake the wording sound more natural and conversational, while staying professional.`,
+                          })
+                        }
+                      >
+                        More natural
+                      </Button>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -515,13 +559,14 @@ function Composer({
             )}
             {edited && (
               <p className="small muted">
-                Save your edits before asking for a rewrite or syncing to Gmail.
+                Save your edits before using the writing assistant or syncing to Gmail.
               </p>
             )}
             {!data.connections.openrouter && (
               <p className="small muted">
-                Write from your profile without an API key. Configure OpenRouter in Settings for AI
-                rewriting and custom instructions.
+                {direct
+                  ? "Configure OpenRouter in Settings to use Improve English. You can write and send emails without it."
+                  : "Write from your profile without an API key. Configure OpenRouter in Settings for AI rewriting and custom instructions."}
               </p>
             )}
           </div>
@@ -563,8 +608,9 @@ function Composer({
                     onChange={(e) => setReviewed(e.target.checked)}
                   />
                   <span>
-                    I checked that the job is open and reviewed the recipient, factual claims, and
-                    attachment.
+                    {direct
+                      ? "I reviewed the recipient email address, message, and any attachment."
+                      : "I checked that the job is open and reviewed the recipient, factual claims, and attachment."}
                   </span>
                 </label>
               )}
@@ -649,7 +695,7 @@ function Composer({
       </section>
       <aside className="email-context" aria-label="Email context">
         {!locked && (
-          <section className="panel context-card" aria-label="Application checks">
+          <section className="panel context-card" aria-label="Email checks">
             <span className="eyebrow">BEFORE YOU SEND</span>
             <p>
               <Badge tone={hasErrors ? "amber" : "green"}>
@@ -666,7 +712,9 @@ function Composer({
               </ul>
             ) : (
               <p className="small">
-                Automated checks passed. Read every claim and confirm the job is still open.
+                {direct
+                  ? "Content checks passed. Review the recipient, message, and any attachment before sending."
+                  : "Automated checks passed. Read every claim and confirm the job is still open."}
               </p>
             )}
             {!data.connections.gmail && (
@@ -681,59 +729,71 @@ function Composer({
             </p>
           </section>
         )}
-        <section className="panel context-card">
-          <span className="eyebrow">THE OPPORTUNITY</span>
-          <h2>{job?.title}</h2>
-          <p className="muted">{company?.name}</p>
-          {job?.match && (
-            <Badge tone={job.match.rating === "strong" ? "green" : "neutral"}>
-              {job.match.score}% fit · {job.match.method === "ai" ? "AI analysis" : "Keyword match"}
-            </Badge>
-          )}
-          <p className="small muted">{job?.location}</p>
-          {job && <External href={job.url}>Read the original listing</External>}
-        </section>
+        {!direct && (
+          <section className="panel context-card">
+            <span className="eyebrow">THE OPPORTUNITY</span>
+            <h2>{job?.title}</h2>
+            <p className="muted">{company?.name}</p>
+            {job?.match && (
+              <Badge tone={job.match.rating === "strong" ? "green" : "neutral"}>
+                {job.match.score}% fit ·{" "}
+                {job.match.method === "ai" ? "AI analysis" : "Keyword match"}
+              </Badge>
+            )}
+            <p className="small muted">{job?.location}</p>
+            {job && <External href={job.url}>Read the original listing</External>}
+          </section>
+        )}
         <section className="panel context-card">
           <span className="eyebrow">RECIPIENT CHECK</span>
           <p className="small">
-            {company?.contactSource || "Add where you found this recruitment address in Companies."}
+            {direct
+              ? to || "Enter the recipient’s email address in To."
+              : company?.contactSource ||
+                "Add where you found this recruitment address in Companies."}
           </p>
-          <Badge tone={company?.contactConfirmed && to === company.email ? "green" : "amber"}>
-            {company?.contactConfirmed && to === company.email
-              ? "Contact checked by you"
-              : "Review recipient"}
-          </Badge>
+          {!direct && (
+            <Badge tone={company?.contactConfirmed && to === company.email ? "green" : "amber"}>
+              {company?.contactConfirmed && to === company.email
+                ? "Contact checked by you"
+                : "Review recipient"}
+            </Badge>
+          )}
           <p className="small muted">
-            An address must be suitable for recruitment. The AI does not invent contacts.
+            {direct
+              ? "Check the address carefully before sending. No company or job is required."
+              : "An address must be suitable for recruitment. The AI does not invent contacts."}
           </p>
         </section>
-        <section className="panel context-card">
-          <span className="eyebrow">GROUNDED IN YOUR EXPERIENCE</span>
-          {draft.evidence.length ? (
-            draft.evidence.map((e, i) => (
-              <div className="evidence" key={i}>
-                <FileCheck2 size={16} />
-                <p>{e}</p>
+        {!direct && (
+          <section className="panel context-card">
+            <span className="eyebrow">GROUNDED IN YOUR EXPERIENCE</span>
+            {draft.evidence.length ? (
+              draft.evidence.map((e, i) => (
+                <div className="evidence" key={i}>
+                  <FileCheck2 size={16} />
+                  <p>{e}</p>
+                </div>
+              ))
+            ) : (
+              <p className="small muted">
+                Supporting profile quotes will appear here after generation. Review all claims,
+                including manual edits.
+              </p>
+            )}
+            {draft.reviewNotes.length > 0 && (
+              <div className="review-notes">
+                <strong>Things to review</strong>
+                {draft.reviewNotes.map((n, i) => (
+                  <p key={i}>{n}</p>
+                ))}
               </div>
-            ))
-          ) : (
-            <p className="small muted">
-              Supporting profile quotes will appear here after generation. Review all claims,
-              including manual edits.
-            </p>
-          )}
-          {draft.reviewNotes.length > 0 && (
-            <div className="review-notes">
-              <strong>Things to review</strong>
-              {draft.reviewNotes.map((n, i) => (
-                <p key={i}>{n}</p>
-              ))}
-            </div>
-          )}
-          <span className="small muted">
-            {draft.model === "Manual" ? "Written by you" : `Written with ${draft.model}`}
-          </span>
-        </section>
+            )}
+            <span className="small muted">
+              {draft.model === "Manual" ? "Written by you" : `Written with ${draft.model}`}
+            </span>
+          </section>
+        )}
       </aside>
     </div>
   );

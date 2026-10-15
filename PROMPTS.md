@@ -4,7 +4,7 @@
 
 1. Add your résumé and factual work examples in **My profile**. List your skills, target roles, preferred locations, signature, and tone. Review and confirm the profile.
 2. Add the employer in **Companies**. If you plan to email, enter a published recruitment address, its source, and confirm it after checking its purpose.
-3. In **Job matches → Add a job**, paste the actual job description and enter the exact title, employer, location, and application link.
+3. In **Job matches → Add a job**, paste the actual job description and enter the exact title, employer, location, and application link. Use a role such as “Full Stack Software Engineer” in the title field; put website links in the URL fields. URL titles are rejected before writing an email, including for previously saved jobs.
 4. Open the job. **Tailor your application** shows recognized skill overlap, missing profile evidence, relevant work examples, requirements to verify, and suggestions for improving your application.
 5. Choose **Prepare email**, then **Write from my profile** for a local draft, or **Generate with AI** for a tailored OpenRouter draft. Both use the saved job and your confirmed profile. Neither sends an email.
 6. Review the email and **Before you send** checks. Save edits. Use **Improve English** to correct grammar, spelling, and phrasing, compare the suggested wording, then choose **Use improved version** or **Keep my wording**. Applying a suggestion changes the editor; save it before approval. **Preview email** shows the recipient, subject, message, and selected résumé. You can copy or download the text without connecting Gmail; these exports do not include the résumé attachment.
@@ -21,6 +21,12 @@ General application:
 
 ```text
 Write a concise, professional application for this exact role. Focus on the two most relevant responsibilities in the job description and connect them to examples in my confirmed profile. Keep it under 150 words. Use a friendly tone and end with a polite request for a conversation. Do not add experience, metrics, qualifications, or availability that I have not provided.
+```
+
+Full professional application:
+
+```text
+Start with Dear Hiring Team. Write 170–230 words plus my signature. Introduce the position I am applying for, summarize my current role and years of experience, and highlight relevant technologies and two concrete achievements from my confirmed profile. Keep any supported metrics accurate. Mention my résumé only if attached, then close with thanks and an invitation to discuss the opportunity. Use my actual contact details once, without placeholders. Do not invent facts or use a website URL as the job title.
 ```
 
 Project-focused application:
@@ -72,9 +78,12 @@ The response must satisfy this structure:
 
 ## Checks and limitations
 
-- Local scoring uses the share of recognized job skill mentions covered by explicitly listed profile skills. Unrelated candidate skills do not reduce the score. Common aliases such as NodeJS/Node.js and Postgres/PostgreSQL are recognized; duplicate skills do not inflate coverage.
-- Keyword coverage is a guide, not a full understanding of a job description. The dictionary is limited, and mentions may describe optional, negated, or historical requirements. Seniority, eligibility, and required versus preferred qualifications still need review. Never add a skill solely to raise the score.
-- Local email writing selects short, exact work examples that mention overlapping skills. If none is available, it produces an introduction and asks you to add a relevant example. It does not invent missing evidence.
+- Local scoring combines recognized job skill coverage (50 points), title overlap (20), location preferences (10), remote availability (5), and explicitly evidenced experience duration (15). Unrelated candidate skills do not reduce the score. Common aliases such as NodeJS/Node.js and Postgres/PostgreSQL are recognized; duplicate skills do not inflate coverage.
+- Title comparisons retain seniority and distinguish management roles. An explicit seniority mismatch caps the score at 59. A stated experience shortfall caps it at 59, or 39 when the gap is at least three years. Missing or ambiguous candidate duration against a stated requirement caps the score at 69 and explains what needs checking. These are ranking rules, not hiring probabilities.
+- To compare experience, include an accurate statement such as “2 years of professional software development experience” in your profile's work experience. The matcher reads explicit durations; it does not calculate tenure from employment dates or sum overlapping roles. Multiple different candidate durations and alternative qualification paths need review. It skips recognized preferred requirements and company-history statements. A target role does not establish your actual seniority.
+- Keyword coverage is a guide, not a full understanding of a job description. The dictionary and experience parser are limited, and skill mentions may describe optional, negated, or historical requirements. Confirm relevant experience, mandatory skills, eligibility, and salary yourself. AI analysis is a separate model assessment. Never add experience or a skill solely to raise the score.
+- Local email writing includes a confirmed background excerpt and prioritizes relevant work examples. When the listing has no recognized skill keywords, it still uses your saved experience and skills instead of producing an empty introduction. It preserves exact excerpts and does not invent missing evidence. Add a short professional summary and specific achievements in My profile for better drafts. Formal tone uses “Dear Hiring Team”; concise tone includes fewer examples.
+- AI writing defaults to a professional summary, relevant skills, and evidenced achievements in 170–230 words plus the signature, or 90–130 words for concise tone. Writing instructions can override the length. Portfolio links already present in the signature should not be repeated.
 - AI responses require valid structure and nonempty evidence quotes present in the supplied profile. The app checks placeholders, subject headers, and attachment references. These checks cannot prove that every claim is true or that the quoted evidence logically supports it; read the entire draft.
 - Missing recipient, invalid subject/body, placeholders, promised-but-missing attachments, unconfirmed profile/contact, changed inputs, closed jobs, and resolved applications are shown in the composer. Long messages and absent résumés are review reminders.
 - Approval and sending independently check content, current facts, and the confirmed recruitment contact on the server. Existing Gmail integrity, duplicate-send, sending-limit, and uncertain-send controls still apply. They cannot guarantee delivery or vacancy availability.

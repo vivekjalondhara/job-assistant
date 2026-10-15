@@ -6,6 +6,12 @@ export interface EmailCheck {
   message: string;
 }
 
+export function draftInputsChanged(draft: Draft, profile: Profile, job?: Job): boolean {
+  if (draft.kind === "direct")
+    return !!draft.resumeId && draft.profileUpdatedAt !== profile.updatedAt;
+  return draft.profileUpdatedAt !== profile.updatedAt || draft.jobUpdatedAt !== job?.updatedAt;
+}
+
 export function contentChecks(
   draft: Pick<Draft, "to" | "subject" | "body" | "resumeId">,
 ): EmailCheck[] {
@@ -44,8 +50,8 @@ export function contentChecks(
     },
     {
       id: "length",
-      status: words > 220 ? "warning" : "pass",
-      message: "Consider shortening this email to around 100–160 words.",
+      status: words > 320 ? "warning" : "pass",
+      message: "Consider shortening this email to around 170–230 words, plus your signature.",
     },
   ];
 }
@@ -56,6 +62,15 @@ export function applicationChecks(
   job?: Job,
   company?: Company,
 ): EmailCheck[] {
+  if (draft.kind === "direct")
+    return [
+      ...contentChecks(draft),
+      {
+        id: "freshness",
+        status: draftInputsChanged(draft, profile) ? "error" : "pass",
+        message: "Your profile or résumé changed. Review the attachment and save the email again.",
+      },
+    ];
   return [
     ...contentChecks(draft),
     {
@@ -70,10 +85,7 @@ export function applicationChecks(
     },
     {
       id: "freshness",
-      status:
-        draft.profileUpdatedAt === profile.updatedAt && draft.jobUpdatedAt === job?.updatedAt
-          ? "pass"
-          : "error",
+      status: draftInputsChanged(draft, profile, job) ? "error" : "pass",
       message: "Your profile or job changed. Review and save the email again.",
     },
     {

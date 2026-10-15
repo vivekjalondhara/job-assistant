@@ -6,6 +6,12 @@ const url = z.union([
     .url()
     .refine((v) => ["http:", "https:"].includes(new URL(v).protocol), "Use an HTTP or HTTPS URL."),
 ]);
+export const jobTitleSchema = text(250)
+  .min(1)
+  .refine(
+    (value) => !/[\r\n]|https?:\/\/|www\.|^[a-z0-9.-]+\.[a-z]{2,}[/?#]\S*$/i.test(value),
+    "Enter the actual job title, such as Full Stack Software Engineer, not a URL. Put the link in Application URL.",
+  );
 export const profileSchema = z.object({
   name: text(160),
   email: z.union([z.literal(""), z.email()]),
@@ -44,7 +50,7 @@ export const companySchema = z.object({
 });
 export const jobSchema = z.object({
   companyId: z.string().min(1),
-  title: text(250).min(1),
+  title: jobTitleSchema,
   location: text(250),
   description: text(50000).min(30),
   url,

@@ -83,6 +83,8 @@ try {
   verifyPdfDeployment(directory, pdf);
   await start();
   assert.equal((await request("/api/state")).status, 401);
+  assert.equal((await request("/api/imports")).status, 401);
+  assert.equal((await request("/api/companies")).status, 401);
   const loginPage = await request("/login");
   assert.match(await loginPage.text(), /Workspace setup token/);
   assert.equal((await post("/api/auth/login", { password: "smoke-test-password" })).status, 403);
@@ -92,6 +94,28 @@ try {
   });
   assert.equal(login.status, 200);
   cookie = login.headers.get("set-cookie")!.split(";")[0];
+  assert.equal(
+    (await post("/api/imports", { action: "start", name: "large.csv", size: 50000001 })).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request("/api/imports", {
+        method: "POST",
+        headers: { origin: "https://foreign.example", "content-type": "application/json" },
+        body: JSON.stringify({ action: "start", name: "companies.csv", size: 100 }),
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await request("/api/imports", { method: "POST", body: "x".repeat(4097) })).status,
+    413,
+  );
+  assert.equal(
+    (await request("/api/imports", { method: "POST", body: "invalid JSON" })).status,
+    400,
+  );
   assert.equal((await request("/")).status, 200);
   const pdfForm = new FormData();
   pdfForm.set("file", new File([new Uint8Array(pdf)], "resume.pdf", { type: "application/pdf" }));

@@ -779,6 +779,20 @@ test("invalid AI evidence and missing promised attachments leave the previous em
   await assert.rejects(writeEmail(job, company, undefined, undefined, false), /attachment/);
   assert.equal((await store.get<Draft>("draft", draft.id))?.version, 1);
 });
+test("URL job titles are rejected before paid AI generation and leave existing drafts intact", async () => {
+  const { draft, job } = await fixtures();
+  await store.put("job", { ...job, title: "https://job-assistant-nine.vercel.app/?view=companies" });
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Provider must not be reached");
+  };
+  await assert.rejects(action("draft.generate", { id: draft.id, version: 1 }), /job title.*URL/i);
+  await assert.rejects(action("draft.template", { id: draft.id, version: 1 }), /job title.*URL/i);
+  assert.equal(requests, 0);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.body, draft.body);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.version, draft.version);
+});
 test("AI generation rejects stale versions and oversized instructions before making a paid request", async () => {
   const { draft } = await fixtures();
   let requests = 0;
@@ -990,5 +1004,5 @@ test("sent emails display their complete saved message and attachment as read-on
   assert.match(markup, /This is my saved application/);
   assert.match(markup, /&lt;script&gt;/);
   assert.doesNotMatch(markup, /<script>|<textarea|Improve English|Send approved email/);
-  assert.match(markup, /Filter application emails/);
+  assert.match(markup, /Filter emails/);
 });

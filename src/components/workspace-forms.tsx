@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -17,6 +17,8 @@ import {
 import type { AppState, Company } from "@/lib/types";
 import type { Act } from "./workspace";
 import { Button, Badge, External } from "./ui";
+import type { CompanyPage } from "@/lib/companies";
+import { readJsonResponse } from "@/lib/http-client";
 
 const value = (form: FormData, key: string) => String(form.get(key) || "").trim();
 const list = (s: string) =>
@@ -473,6 +475,35 @@ export function JobForm({
   busy: string;
   onDone: () => void;
 }) {
+  const [companySearch, setCompanySearch] = useState("");
+  const [companyOptions, setCompanyOptions] = useState(companies.slice(0, 50));
+  const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
+  const [companyError, setCompanyError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const result = await readJsonResponse<CompanyPage>(
+          await fetch(`/api/companies?q=${encodeURIComponent(companySearch)}`, {
+            signal: controller.signal,
+          }),
+        );
+        setCompanyOptions(result.companies);
+        setCompanyError("");
+      } catch (error) {
+        if (!controller.signal.aborted)
+          setCompanyError(error instanceof Error ? error.message : "Could not find companies.");
+      }
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [companySearch]);
+  const options =
+    selectedCompany && !companyOptions.some((company) => company.id === selectedCompany.id)
+      ? [selectedCompany, ...companyOptions]
+      : companyOptions;
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
@@ -491,12 +522,31 @@ export function JobForm({
   return (
     <form className="modal-form" onSubmit={submit}>
       {!companies.length && <div className="notice">Add a company before adding a vacancy.</div>}
+      <Field
+        label="Find a company"
+        hint="Search your full company list. Up to 50 matches are shown below."
+      >
+        <input
+          value={companySearch}
+          maxLength={200}
+          placeholder="Search by company name"
+          onChange={(event) => setCompanySearch(event.target.value)}
+        />
+      </Field>
+      {companyError && <p role="alert">{companyError}</p>}
       <Field label="Company">
-        <select name="companyId" required defaultValue="">
+        <select
+          name="companyId"
+          required
+          value={selectedCompany?.id || ""}
+          onChange={(event) =>
+            setSelectedCompany(options.find((company) => company.id === event.target.value) || null)
+          }
+        >
           <option value="" disabled>
             Choose a company
           </option>
-          {companies.map((c) => (
+          {options.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
             </option>

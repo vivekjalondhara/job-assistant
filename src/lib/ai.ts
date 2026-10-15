@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { all, put, id, now, profile, settings, get, remove, transaction } from "./db";
 import { AppError, appUrl, privateHash } from "./security";
-import { emailOutputSchema, profileExtractionSchema } from "./validation";
+import { emailOutputSchema, jobTitleSchema, profileExtractionSchema } from "./validation";
 import type { Company, Draft, Job, Usage } from "./types";
 import {
   applicationEmailPrompt,
@@ -173,6 +173,7 @@ export async function writeEmail(
       "Confirm your profile with your name and experience before generating an email.",
     );
   if (job.status === "closed") throw new AppError("This vacancy is closed. Choose an open role.");
+  const title = jobTitleSchema.parse(job.title);
   const sourceText = [p.experience, p.projects, p.education, p.skills.join(", ")].join("\n");
   const result = await generate("application_email", emailOutputSchema, applicationEmailPrompt, {
     candidate: {
@@ -187,7 +188,7 @@ export async function writeEmail(
     candidateEvidence: sourceText,
     company: { name: company.name },
     job: {
-      title: job.title,
+      title,
       description: job.description.slice(0, 24000),
       location: job.location,
     },
@@ -228,7 +229,15 @@ export async function polishEmail(draft: Draft) {
       changes: z.array(z.string().trim().min(1).max(250)).max(5),
     }),
     polishEmailPrompt,
-    { subject: draft.subject, body, purpose: draft.followUpOf ? "follow-up" : "application" },
+    {
+      subject: draft.subject,
+      body,
+      purpose: draft.followUpOf
+        ? "follow-up"
+        : draft.kind === "direct"
+          ? "direct email"
+          : "application",
+    },
   );
   // Language editing must not silently alter numerical facts or contact links.
   // This is a narrow guard; the comparison UI still requires a factual review.

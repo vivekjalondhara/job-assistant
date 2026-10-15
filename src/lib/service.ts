@@ -11,12 +11,15 @@ import {
   enqueue,
   tasks,
   transaction,
+  query,
+  recent,
 } from "./db";
 import { AppError } from "./security";
 import {
   companySchema,
   draftEditSchema,
   jobSchema,
+  jobTitleSchema,
   profileSchema,
   settingsSchema,
 } from "./validation";
@@ -36,19 +39,32 @@ import type { AppState, Company, Draft, Job, Usage } from "./types";
 export async function state(): Promise<AppState> {
   const conn = await connection();
   const user = await profile();
+  const jobs = await recent<Job>("job", 2000);
+  const drafts = await all<Draft>("draft");
+  const companyIds = [...new Set([...jobs, ...drafts].map((item) => item.companyId))];
+  const companies = await query<{ data: Company }>(
+    `SELECT data FROM folio_records WHERE kind='company' AND
+     (id=ANY($1::text[]) OR id IN (SELECT id FROM folio_records WHERE kind='company' ORDER BY sequence DESC LIMIT 100))
+     ORDER BY sequence DESC`,
+    [companyIds],
+  );
+  const companyCount = await query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM folio_records WHERE kind='company'",
+  );
   return {
     profile: user,
-    companies: await all("company"),
-    jobs: (await all<Job>("job")).slice(0, 2000).map((job) => ({
+    companies: companies.rows.map((row) => row.data),
+    companyCount: companyCount.rows[0].count,
+    jobs: jobs.map((job) => ({
       ...job,
       match:
         job.match?.method === "ai" && job.match.profileUpdatedAt === user.updatedAt
           ? job.match
           : matchJob(job, user),
     })),
-    drafts: await all("draft"),
+    drafts,
     settings: await settings(),
-    activity: (await all<AppState["activity"][number]>("activity")).slice(0, 40),
+    activity: await recent<AppState["activity"][number]>("activity", 40),
     usage: await all<Usage>("usage"),
     tasks: await tasks(),
     connections: {
@@ -84,17 +100,19 @@ function editable(draft: Draft) {
       409,
     );
 }
-async function newDraft(job: Job, company: Company): Promise<Draft> {
+async function newDraft(job?: Job, company?: Company): Promise<Draft> {
+  if (job) jobTitleSchema.parse(job.title);
   const p = await profile();
   return {
     id: id(),
-    jobId: job.id,
-    companyId: company.id,
-    to: company.email,
-    subject: `Application for ${job.title}${p.name ? ` — ${p.name}` : ""}`,
+    kind: job ? "application" : "direct",
+    jobId: job?.id || "",
+    companyId: company?.id || "",
+    to: company?.email || "",
+    subject: job ? `Application for ${job.title}${p.name ? ` — ${p.name}` : ""}` : "",
     body: "",
-    resumeId: p.resumeId,
-    resumeName: p.resumeName,
+    resumeId: job ? p.resumeId : "",
+    resumeName: job ? p.resumeName : "",
     evidence: [],
     reviewNotes: [],
     model: "Manual",
@@ -111,7 +129,7 @@ async function newDraft(job: Job, company: Company): Promise<Draft> {
     lastReplyAt: null,
     followUpOf: null,
     profileUpdatedAt: p.updatedAt,
-    jobUpdatedAt: job.updatedAt,
+    jobUpdatedAt: job?.updatedAt || "",
     createdAt: now(),
     updatedAt: now(),
   };
@@ -126,6 +144,7 @@ export async function action(actionName: string, input: unknown) {
     "job.status",
     "job.application",
     "draft.create",
+    "draft.direct",
     "draft.followup",
     "settings.save",
     "gmail.sync",
@@ -277,6 +296,14 @@ async function performAction(actionName: string, input: unknown) {
         return { message: "AI match analysis is ready." };
       });
     }
+    case "draft.direct": {
+      const draft = await newDraft();
+      await put("draft", draft);
+      return {
+        message: "New email opened. Enter the recipient, subject, and message.",
+        draftId: draft.id,
+      };
+    }
     case "draft.create": {
       const job = await requireJob(itemId());
       const company = (await get<Company>("company", job.companyId))!;
@@ -290,6 +317,8 @@ async function performAction(actionName: string, input: unknown) {
     case "draft.generate": {
       const draft = await requireDraft(itemId());
       editable(draft);
+      if (draft.kind === "direct")
+        throw new AppError("Write your direct email, then use Improve English to edit it.");
       if (draft.followUpOf)
         throw new AppError(
           "Edit the follow-up directly; application generation is for first emails.",
@@ -364,6 +393,8 @@ async function performAction(actionName: string, input: unknown) {
       return exclusive(`draft:${itemId()}`, async () => {
         const draft = await requireDraft(itemId());
         editable(draft);
+        if (draft.kind === "direct")
+          throw new AppError("Write your direct email, then use Improve English to edit it.");
         if (z.number().int().parse(p.version) !== draft.version)
           throw new AppError("The draft changed in another tab. Reload before generating.", 409);
         const job = await requireJob(draft.jobId);
@@ -416,7 +447,9 @@ async function performAction(actionName: string, input: unknown) {
             ? {
                 evidence: [],
                 reviewNotes: [
-                  "This email was edited manually. Recheck every claim against your confirmed profile.",
+                  draft.kind === "direct"
+                    ? "Review the recipient, message, and any attachment before sending."
+                    : "This email was edited manually. Recheck every claim against your confirmed profile.",
                 ],
                 model: "Manual",
               }
@@ -429,7 +462,7 @@ async function performAction(actionName: string, input: unknown) {
           approvedAt: null,
           gmailRawHash: null,
           profileUpdatedAt: user.updatedAt,
-          jobUpdatedAt: (await requireJob(draft.jobId)).updatedAt,
+          jobUpdatedAt: draft.kind === "direct" ? "" : (await requireJob(draft.jobId)).updatedAt,
           updatedAt: now(),
         });
         return { message: "Email saved. Any earlier approval has been cleared." };
@@ -447,6 +480,8 @@ async function performAction(actionName: string, input: unknown) {
       return { message: "Email sent through Gmail." };
     case "draft.followup": {
       const original = await requireDraft(itemId());
+      if (original.kind === "direct")
+        throw new AppError("For direct emails, use New email to write another message.");
       if (original.status !== "sent" || original.replyStatus !== "none" || !original.sentAt)
         throw new AppError(
           "Follow-ups are only available for sent messages with no reply or bounce.",

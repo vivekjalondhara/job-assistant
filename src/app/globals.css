@@ -2403,3 +2403,14 @@ td select {
     scroll-behavior: auto !important;
   }
 }
+
+.csv-import-panel { padding: 20px; margin-bottom: 24px; }
+.csv-import-heading, .company-pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.csv-import-heading p { margin: 6px 0 0; }
+.csv-import-progress { display: grid; gap: 8px; margin-top: 16px; }
+.csv-import-panel progress { width: 100%; height: 8px; accent-color: var(--accent, #2c6951); }
+.csv-import-result { border-top: 1px solid var(--line, #e5e3dd); padding-top: 16px; margin-top: 16px; overflow-wrap: anywhere; }
+.csv-import-result p { margin: 8px 0; }
+.csv-import-result summary { cursor: pointer; font-size: 13px; }
+.company-pagination { margin-top: 20px; }
+@media (max-width: 600px) { .csv-import-panel { padding: 16px; } .csv-import-heading { align-items: flex-start; } }

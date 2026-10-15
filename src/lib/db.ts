@@ -60,6 +60,7 @@ export async function initializeDatabase() {
             sequence BIGSERIAL UNIQUE, kind TEXT NOT NULL, id TEXT NOT NULL,
             data JSONB NOT NULL, PRIMARY KEY (kind, id));
           CREATE INDEX IF NOT EXISTS folio_records_kind_sequence ON folio_records(kind, sequence DESC);
+          CREATE INDEX IF NOT EXISTS folio_company_name ON folio_records(lower(btrim(data->>'name'))) WHERE kind='company';
           CREATE TABLE IF NOT EXISTS folio_tasks (
             id TEXT PRIMARY KEY, type TEXT NOT NULL, "targetId" TEXT NOT NULL,
             status TEXT NOT NULL, error TEXT, "createdAt" TEXT NOT NULL,
@@ -120,6 +121,26 @@ export async function all<T>(kind: string): Promise<T[]> {
     [kind],
   );
   return result.rows.map((row) => row.data);
+}
+export async function recent<T>(kind: string, limit: number): Promise<T[]> {
+  const result = await query<{ data: T }>(
+    "SELECT data FROM folio_records WHERE kind=$1 ORDER BY sequence DESC LIMIT $2",
+    [kind, limit],
+  );
+  return result.rows.map((row) => row.data);
+}
+
+// Call inside a transaction when this belongs to a larger atomic operation.
+export async function putMany<T extends { id: string }>(kind: string, values: T[]) {
+  if (!values.length) return;
+  await transaction(async () => {
+    await query(
+      `INSERT INTO folio_records(kind,id,data)
+       SELECT $1, item->>'id', item FROM jsonb_array_elements($2::jsonb) AS item
+       ON CONFLICT(kind,id) DO UPDATE SET data=EXCLUDED.data`,
+      [kind, JSON.stringify(values)],
+    );
+  });
 }
 export async function put<T extends { id: string }>(kind: string, value: T): Promise<T> {
   return transaction(async () => {

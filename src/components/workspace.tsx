@@ -29,6 +29,9 @@ import { Badge, Button, Empty, External, Modal, relative, label, allowNavigation
 import { ProfilePanel, SettingsPanel, CompanyForm, JobForm } from "./workspace-forms";
 import { EmailPanel } from "./email-panel";
 import { JobGuidance } from "./job-guidance";
+import { CsvImportPanel } from "./csv-import-panel";
+import { CompanyDirectory } from "./company-directory";
+import { readJsonResponse } from "@/lib/http-client";
 
 export type Act = (
   name: string,
@@ -103,8 +106,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: name, payload }),
       });
-      const result = await r.json();
-      if (!r.ok) throw new Error(result.error || "Could not complete this action.");
+      const result = await readJsonResponse<NonNullable<Awaited<ReturnType<Act>>>>(r);
       await refresh();
       if (result.message) setToast({ message: result.message, error: false });
       return result;
@@ -115,15 +117,16 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
       setBusy("");
     }
   };
-  async function upload(file: File, type: "resume" | "csv") {
+  async function upload(file: File, type: "resume") {
+    if (busy) return;
     setBusy("upload");
     try {
+      if (file.size > 4 * 1024 * 1024) throw new Error("Upload a résumé smaller than 4 MB.");
       const form = new FormData();
       form.set("file", file);
       form.set("type", type);
       const r = await fetch("/api/upload", { method: "POST", body: form });
-      const result = await r.json();
-      if (!r.ok) throw new Error(result.error);
+      const result = await readJsonResponse<{ message: string }>(r);
       await refresh();
       setToast({ message: result.message, error: false });
     } catch (e) {
@@ -395,7 +398,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                   {
                     label: "Open opportunities",
                     number: activeJobs.length,
-                    note: `Across ${data.companies.length} companies`,
+                    note: `Across ${data.companyCount} companies`,
                     icon: BriefcaseBusiness,
                   },
                   {
@@ -558,135 +561,24 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
               </p>
             </>
           )}
-          {view === "companies" && (
-            <>
-              <div className="page-heading">
-                <div>
-                  <span className="eyebrow">PLACES YOU COULD BELONG</span>
-                  <h1>Your company shortlist.</h1>
-                  <p>Choose the places. We’ll help you keep up with their opportunities.</p>
-                </div>
-                <div className="button-row">
-                  <label className={`btn secondary file-button ${busy ? "disabled" : ""}`}>
-                    <ArrowDownToLine size={16} /> Import CSV
-                    <input
-                      type="file"
-                      accept=".csv"
-                      disabled={!!busy}
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) void upload(file, "csv");
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
-                  <Button variant="primary" onClick={() => setCompanyEditor("new")}>
-                    <Plus size={16} /> Add company
-                  </Button>
-                </div>
+          <section hidden={view !== "companies"}>
+            <div className="page-heading">
+              <div>
+                <span className="eyebrow">PLACES YOU COULD BELONG</span>
+                <h1>Your company shortlist.</h1>
+                <p>Choose the places. We’ll help you keep up with their opportunities.</p>
               </div>
-              <div className="toolbar">
-                <label className="search-field">
-                  <Search size={17} />
-                  <input
-                    aria-label="Search companies"
-                    placeholder="Find a company"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </label>
-                <Button
-                  busy={busy === "company.scan"}
-                  disabled={!!busy || !data.companies.length}
-                  onClick={() => act("company.scan")}
-                >
-                  <RefreshCw size={15} /> Check all companies
-                </Button>
-              </div>
-              {!data.companies.length ? (
-                <div className="panel">
-                  <Empty
-                    title="Where would you love to work?"
-                    description="Add your first company or use Import CSV to upload your company list."
-                  >
-                    <Button onClick={() => setCompanyEditor("new")}>
-                      <Plus size={16} /> Add company
-                    </Button>
-                  </Empty>
-                </div>
-              ) : (
-                <div className="company-grid">
-                  {data.companies
-                    .filter((c) => c.name.toLowerCase().includes(query.toLowerCase()))
-                    .map((c) => (
-                      <article className="company-card" key={c.id}>
-                        <div className="company-card-top">
-                          <span className="company-avatar large">
-                            {c.name.slice(0, 2).toUpperCase()}
-                          </span>
-                          <Badge
-                            tone={
-                              c.paused
-                                ? "amber"
-                                : c.checkStatus === "success"
-                                  ? "green"
-                                  : c.checkStatus === "failed"
-                                    ? "red"
-                                    : "neutral"
-                            }
-                          >
-                            {c.paused
-                              ? "Paused"
-                              : c.checkStatus === "never"
-                                ? "Ready to check"
-                                : label(c.checkStatus)}
-                          </Badge>
-                        </div>
-                        <h2>{c.name}</h2>
-                        <p className="company-domain">
-                          {c.website ? new URL(c.website).hostname : "Website not added"}
-                        </p>
-                        <div className="company-facts">
-                          <span>
-                            {
-                              data.jobs.filter((j) => j.companyId === c.id && j.status !== "closed")
-                                .length
-                            }{" "}
-                            roles saved
-                          </span>
-                          <span>{c.source === "manual" ? "Manual source" : label(c.source)}</span>
-                        </div>
-                        <p className="company-note">
-                          {c.checkNote || "Check the careers page for current opportunities."}
-                        </p>
-                        <div className="company-contact">
-                          <Mail size={14} />
-                          <span>{c.email || "Recruitment contact not added"}</span>
-                          {c.contactConfirmed && <Check size={14} />}
-                        </div>
-                        <footer>
-                          <button className="inline-link" onClick={() => setCompanyEditor(c)}>
-                            Edit company
-                          </button>
-                          <button
-                            className="icon-btn bordered"
-                            disabled={!!busy || c.paused}
-                            aria-label={`Check ${c.name}`}
-                            onClick={() => act("company.scan", { id: c.id })}
-                          >
-                            <RefreshCw size={15} />
-                          </button>
-                        </footer>
-                      </article>
-                    ))}
-                </div>
-              )}
-              <p className="small muted bottom-note">
-                CSV columns: Company, Website, Careers URL, Recruitment email. Imported contacts
-                need your verification.
-              </p>
-            </>
-          )}
+              <Button variant="primary" onClick={() => setCompanyEditor("new")}>
+                <Plus size={16} /> Add company
+              </Button>
+            </div>
+            <CsvImportPanel onChanged={refresh} />
+            <CompanyDirectory data={data} busy={busy} act={act} onEdit={setCompanyEditor} />
+            <p className="small muted bottom-note">
+              CSV columns: Company, Website, Careers URL, Recruitment email. Imported contacts need
+              your verification.
+            </p>
+          </section>
           {view === "profile" && (
             <ProfilePanel
               key={data.profile.updatedAt}

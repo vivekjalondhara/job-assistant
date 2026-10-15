@@ -35,12 +35,14 @@ For development, run `npm run dev`. Local `dev` and `start` launch the web app a
 
 `vercel.json` schedules `/api/cron` daily at 06:00 UTC. While the workspace is open, its authenticated polling also processes queued jobs and schedules reply checks. For more frequent unattended checks, configure a schedule supported by your Vercel plan or an external scheduler that sends `Authorization: Bearer <CRON_SECRET>`. The worker uses a database lease, atomic task claims, and bounded execution. Large feeds can time out safely; existing listings are retained.
 
-Uploads are limited to **4 MB** to fit Vercel's request limit. The server encrypts résumé binaries before storing them. Database records, including extracted profile text, are stored in Postgres. Use a separate Neon branch and bucket credentials for preview deployments; previews should not share production data.
+See [Cron verification and Vercel setup](CRON_SETUP.md) for the required production settings, IST schedule, authenticated check, and current verification results. Enable **Check companies daily** in Folio Settings; it is off by default.
+
+Résumé uploads are limited to **4 MB** to fit Vercel's request limit. CSV imports support **50 MB** through signed uploads directly to the private object-storage bucket. Run `npm run storage:cors -- https://your-app.vercel.app` once for each app origin (and `http://localhost:3210` for local development) to permit browser uploads; existing bucket CORS rules are preserved. The server encrypts résumé binaries before storing them. Database records, including extracted profile text, are stored in Postgres. Use a separate Neon branch and bucket credentials for preview deployments; previews should not share production data.
 
 ## Use it, one step at a time
 
 1. **My profile:** upload a PDF, DOCX, or TXT résumé (up to 4 MB). Fill your skills, experience, projects, target roles, location preferences, and signature. AI extraction is optional. Check the facts and confirm your profile. Image-only/scanned résumés need conversion to searchable text first.
-2. **Companies:** add companies manually or upload a CSV with **Import CSV**. Supported column names include `Company`, `Website`, `Careers URL`, `Recruitment email`, and `Contact source`. Importing does not verify an email address.
+2. **Companies:** add companies manually or upload a CSV with **Import CSV**. Supported column names include `Company`, `Website`, `Careers URL`, `Recruitment email`, and `Contact source`. Importing does not verify an email address. CSV upload progress and background import results appear on Companies. The importer streams the file, writes batches of up to 1,000 rows, skips existing company names, and reports invalid rows. The company directory searches the full database and displays 50 companies per page.
 3. **Find vacancies:** enter an official Ashby, Greenhouse, or Lever board URL and run a company check. Other careers sites support manual job entry. Daily scheduled checks can be enabled in Settings.
 4. **Review matches:** keyword scores work locally after profile confirmation. With OpenRouter configured, open a job and request AI analysis for reasons, gaps, and unknowns. Scores rank fit; they are not hiring probabilities.
 5. **Choose a contact:** the company editor can find published email addresses in saved job descriptions. Review their context and purpose, then confirm an appropriate recruitment contact. When no address is available, use the company's application link.
@@ -49,6 +51,8 @@ Uploads are limited to **4 MB** to fit Vercel's request limit. The server encryp
 8. **Send:** click **Send approved email**. The application rechecks the approved draft against Gmail, current profile/job facts, duplicate sends, and your sending allowance. Supported stale vacancy feeds are rechecked before sending. Sending is always an explicit action.
 9. **Track:** view emails and application status separately. Sending an email does not mark an employer's application form as submitted. Mark formal submissions and interviews yourself. Known Gmail application threads are checked for replies and delivery notices.
 10. **Follow up:** after the configured delay, prepare one follow-up for an unanswered email. Review, save, approve, and send it using the same process. A detected reply or bounce blocks a follow-up.
+
+To email someone without adding a company or job, open **Email studio → New email**. Type a recipient in **To**, add a subject, and write your message. A résumé attachment is optional and starts unchecked. Choose **Save edits**, then **Save to Gmail**, review the recipient and message, **Approve this draft**, and **Send approved email**. Direct emails do not require a confirmed profile. **Improve English** is available with OpenRouter; profile-based generation and follow-up reminders remain part of job applications. Direct emails appear in Email studio, including Sent, and their known threads are checked for replies. Sending allowances and duplicate-message protection still apply.
 
 ## Connect OpenRouter
 
@@ -146,3 +150,15 @@ npm audit
 Tests use isolated Postgres schemas and S3 prefixes. Start the services in `compose.test.yml` with `docker compose -f compose.test.yml up -d` before running them; stop them afterward with `docker compose -f compose.test.yml down`. Tests never read the production `.env`. Override only `TEST_DATABASE_URL` and `TEST_S3_*` to use dedicated test services.
 
 Tests cover authentication and encryption, source restrictions, imports, failed feed preservation, confirmation requirements, draft approval invalidation, concurrent send clicks, uncertain send outcomes, changes during sending, OpenRouter request/privacy/accounting behavior, and résumé extraction.  Live credentials are still needed to validate external AI and Gmail integrations end to end.
+
+## Large CSV imports
+
+CSV bytes go from the browser directly to private S3-compatible storage. Authenticated `/api/imports` requests contain metadata only, so the 50 MB file never passes through a Vercel Function request body. The signed upload lasts one hour and is limited to the declared file size. Keep the tab open until uploading completes; import processing runs after the API response. Résumé uploads continue to use `/api/upload`.
+
+The worker streams UTF-8 CSV with BOM and quoted multiline-cell support, validates headers, and commits company batches and progress in the same short transaction. Importing preserves existing company details and leaves new contacts unconfirmed. Rows with missing/overlong names or oversized stored fields are skipped; the first 20 row errors are shown. Malformed CSV syntax stops the import with an explanation; already committed batches remain saved. Re-uploading a corrected file skips existing companies. Individual CSV records are limited to 100,000 characters.
+
+Processing has a bounded execution budget and a database lease. Interrupted jobs resume from their committed record count on the next import/status request, workspace poll, local-worker tick, or cron run. On Vercel, `after()` is bounded by function duration: if the tab is closed and a run exhausts its budget or is terminated, the existing daily cron supplies the next unattended recovery trigger. Configure a more frequent scheduler if prompt unattended recovery is required. Temporary storage/database errors retry across triggers; after three failures, use **Retry import**. Imports remain available when scheduled vacancy automation is paused.
+
+Original CSV objects are private but are not encrypted with the app's résumé encryption key. Completed CSVs become eligible for deletion after one hour; abandoned uploads and failed files after seven days. Cleanup runs with the existing worker and removes only objects recorded for those imports. Import summaries remain in Postgres.
+
+Targeted verification: `node --import tsx --test tests/csv-imports.test.ts`. This uses isolated local Postgres/S3 storage and includes an actual 50,000,000-byte CSV with 50,000 companies, restart recovery, duplicate handling, quoted newlines, malformed CSV errors, and bounded workspace responses. Local timings are not a production speed guarantee.

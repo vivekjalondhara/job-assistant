@@ -16,6 +16,7 @@ import { connection, syncReplies } from "./gmail";
 import { AppError } from "./security";
 import type { Company, Draft } from "./types";
 import { randomUUID } from "node:crypto";
+import { cleanupCsvImports, runCsvImports } from "./csv-imports";
 
 // A database lease prevents overlapping cron, browser, and local-worker runs.
 export async function runWorker(budgetMs = 200000) {
@@ -30,6 +31,9 @@ export async function runWorker(budgetMs = 200000) {
   if (!acquired) return { processed: 0, busy: true };
   let processed = 0;
   try {
+    // User-requested imports continue even when scheduled vacancy checks are paused.
+    await runCsvImports(Math.max(0, deadline - Date.now() - 30000));
+    await cleanupCsvImports();
     await transaction(async () => {
       await put("worker", { id: "main", at: now() });
       await query(

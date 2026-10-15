@@ -3,7 +3,10 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import type { Readable } from "node:stream";
 import { AppError } from "./security";
 
 let client: S3Client | undefined;
@@ -29,6 +32,45 @@ export function storageClient() {
 }
 export const storageBucket = () => process.env.S3_BUCKET || "assets";
 export const resumeKey = (id: string) => `${process.env.S3_PREFIX || "folio"}/resumes/${id}`;
+export const csvKey = (id: string) => `${process.env.S3_PREFIX || "folio"}/imports/${id}.csv`;
+
+export async function csvUploadUrl(id: string, size: number) {
+  return getSignedUrl(
+    storageClient(),
+    new PutObjectCommand({
+      Bucket: storageBucket(),
+      Key: csvKey(id),
+      ContentLength: size,
+      ContentType: "text/csv",
+      CacheControl: "private, no-store",
+    }),
+    { expiresIn: 3600 },
+  );
+}
+
+export async function csvObjectInfo(id: string) {
+  const result = await storageClient().send(
+    new HeadObjectCommand({
+      Bucket: storageBucket(),
+      Key: csvKey(id),
+    }),
+    { abortSignal: AbortSignal.timeout(15000) },
+  );
+  return { size: result.ContentLength, etag: result.ETag };
+}
+
+export async function csvObjectStream(id: string, etag: string, signal: AbortSignal) {
+  const result = await storageClient().send(
+    new GetObjectCommand({
+      Bucket: storageBucket(),
+      Key: csvKey(id),
+      IfMatch: etag,
+    }),
+    { abortSignal: signal },
+  );
+  if (!result.Body) throw new AppError("The uploaded CSV could not be read.");
+  return result.Body as Readable;
+}
 export async function putObject(key: string, encrypted: string) {
   await storageClient().send(
     new PutObjectCommand({

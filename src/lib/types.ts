@@ -72,6 +72,8 @@ export interface Job {
 export type DraftStatus = "draft" | "gmail_draft" | "approved" | "sending" | "sent" | "uncertain";
 export interface Draft {
   id: string;
+  // Older drafts without a kind are job applications.
+  kind?: "application" | "direct";
   jobId: string;
   companyId: string;
   to: string;
@@ -157,6 +159,7 @@ export interface Connections {
 export interface AppState {
   profile: Profile;
   companies: Company[];
+  companyCount: number;
   jobs: Job[];
   drafts: Draft[];
   settings: Settings;

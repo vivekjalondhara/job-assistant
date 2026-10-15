@@ -6,7 +6,7 @@ import { readResume } from "./files";
 import { exclusive } from "./ai";
 import { scanCompany } from "./jobs";
 import type { Draft, Job, Company } from "./types";
-import { contentChecks } from "./email-checks";
+import { contentChecks, draftInputsChanged } from "./email-checks";
 import { allowedGoogleEmails, isAllowedGoogleEmail } from "./google-config";
 interface GmailConnection {
   email: string;
@@ -215,6 +215,8 @@ export async function disconnectGmail() {
 export const draftHash = (draft: Draft) =>
   digest(
     JSON.stringify({
+      // Keep existing application approvals compatible while binding direct-email mode.
+      ...(draft.kind === "direct" ? { kind: "direct" } : {}),
       to: draft.to,
       subject: draft.subject,
       body: draft.body,
@@ -237,34 +239,45 @@ async function checkCurrent(draft: Draft) {
       "Save this email to the connected Gmail account and approve it again before sending.",
       409,
     );
-  const company = await get<Company>("company", draft.companyId);
-  if (
-    !company?.contactConfirmed ||
-    !company.contactSource.trim() ||
-    draft.to.toLowerCase() !== company.email.toLowerCase()
-  )
-    throw new AppError(
-      "Confirm this recruitment address and its source in Companies before approving or sending.",
-      409,
-    );
-  if (!(await profile()).confirmed)
-    throw new AppError("Confirm your profile before approving or sending an application.", 409);
-  const job = await get<Job>("job", draft.jobId);
-  if (!job || job.status === "closed")
-    throw new AppError("This job is no longer open. Review the application before sending.", 409);
-  if (
-    (await profile()).updatedAt !== draft.profileUpdatedAt ||
-    job.updatedAt !== draft.jobUpdatedAt
-  )
-    throw new AppError(
-      "Your profile or the job changed. Save the reviewed email again before approving.",
-      409,
-    );
-  if (["rejected", "withdrawn", "offer"].includes(job.applicationStatus))
-    throw new AppError(
-      "This application is already resolved. Review its status before sending.",
-      409,
-    );
+  const user = await profile();
+  if (draft.kind === "direct") {
+    if (draft.companyId || draft.jobId || draft.followUpOf)
+      throw new AppError(
+        "This direct email has invalid application details. Create a new email.",
+        409,
+      );
+    if (draftInputsChanged(draft, user))
+      throw new AppError(
+        "Your profile or résumé changed. Review the attachment and save the email again.",
+        409,
+      );
+  } else {
+    const company = await get<Company>("company", draft.companyId);
+    if (
+      !company?.contactConfirmed ||
+      !company.contactSource.trim() ||
+      draft.to.toLowerCase() !== company.email.toLowerCase()
+    )
+      throw new AppError(
+        "Confirm this recruitment address and its source in Companies before approving or sending.",
+        409,
+      );
+    if (!user.confirmed)
+      throw new AppError("Confirm your profile before approving or sending an application.", 409);
+    const job = await get<Job>("job", draft.jobId);
+    if (!job || job.status === "closed")
+      throw new AppError("This job is no longer open. Review the application before sending.", 409);
+    if (draftInputsChanged(draft, user, job))
+      throw new AppError(
+        "Your profile or the job changed. Save the reviewed email again before approving.",
+        409,
+      );
+    if (["rejected", "withdrawn", "offer"].includes(job.applicationStatus))
+      throw new AppError(
+        "This application is already resolved. Review its status before sending.",
+        409,
+      );
+  }
   if (draft.followUpOf) {
     const original = await get<Draft>("draft", draft.followUpOf);
     if (!original || original.replyStatus !== "none")
@@ -399,7 +412,7 @@ export async function sendDraft(draftId: string) {
       !draft.gmailDraftId
     )
       throw new AppError("Review and approve the latest Gmail draft before sending.", 409);
-    const company = await get<Company>("company", draft.companyId);
+    const company = draft.kind === "direct" ? null : await get<Company>("company", draft.companyId);
     if (
       company &&
       company.source !== "manual" &&
@@ -424,7 +437,8 @@ export async function sendDraft(draftId: string) {
         throw new AppError("Sending is paused. Resume automation in Settings.", 409);
       if (latest.status !== "approved" || latest.version !== draft.version)
         throw new AppError("This draft changed or is already being sent.", 409);
-      const recent = (await all<Draft>("draft")).filter(
+      const drafts = await all<Draft>("draft");
+      const recent = drafts.filter(
         (d) =>
           (d.sentAt && Date.parse(d.sentAt) > Date.now() - 86400000) ||
           ["sending", "uncertain"].includes(d.status),
@@ -432,17 +446,24 @@ export async function sendDraft(draftId: string) {
       if (recent.length >= (await settings()).dailySendLimit)
         throw new AppError("Your rolling 24-hour sending allowance has been reached.", 429);
       if (
-        (await all<Draft>("draft")).some(
+        (draft.kind === "direct" ? recent : drafts).some(
           (d) =>
             d.id !== draft.id &&
-            d.jobId === draft.jobId &&
+            (draft.kind === "direct"
+              ? d.kind === "direct" &&
+                d.subject === draft.subject &&
+                d.body === draft.body &&
+                d.resumeId === draft.resumeId
+              : d.kind !== "direct" && d.jobId === draft.jobId) &&
             d.to.toLowerCase() === draft.to.toLowerCase() &&
             d.followUpOf === draft.followUpOf &&
             ["sent", "sending", "uncertain"].includes(d.status),
         )
       )
         throw new AppError(
-          "An email for this application has already been sent or is awaiting verification.",
+          draft.kind === "direct"
+            ? "This same email was sent to this recipient in the last 24 hours or is awaiting verification."
+            : "An email for this application has already been sent or is awaiting verification.",
           409,
         );
       await put("draft", { ...latest, status: "sending", updatedAt: now() });
