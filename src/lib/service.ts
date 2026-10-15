@@ -31,6 +31,7 @@ import {
   googleConfigured,
   saveGmailDraft,
   sendDraft,
+  sendDirectEmail,
 } from "./gmail";
 import { inferBoard } from "./jobs";
 import { matchJob } from "./matching";
@@ -477,6 +478,9 @@ async function performAction(actionName: string, input: unknown) {
     }
     case "draft.send":
       await sendDraft(itemId());
+      return { message: "Email sent through Gmail." };
+    case "draft.sendDirect":
+      await sendDirectEmail(itemId(), p);
       return { message: "Email sent through Gmail." };
     case "draft.followup": {
       const original = await requireDraft(itemId());

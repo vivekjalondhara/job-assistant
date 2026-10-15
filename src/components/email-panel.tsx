@@ -203,12 +203,13 @@ function Composer({
     subject,
     body,
     resumeId: attach ? (dirty ? data.profile.resumeId : draft.resumeId) : "",
+    ...(direct ? { profileUpdatedAt: data.profile.updatedAt } : {}),
   };
   const checks = applicationChecks(preview, data.profile, job, company);
   const senderMatches =
     !!data.connections.gmail &&
     draft.gmailAccountEmail === data.connections.gmailEmail.toLowerCase();
-  if (data.connections.gmail && draft.gmailDraftId && !senderMatches)
+  if (!direct && data.connections.gmail && draft.gmailDraftId && !senderMatches)
     checks.push({
       id: "gmail-account",
       status: "error",
@@ -378,7 +379,7 @@ function Composer({
             {inputsChanged && (
               <p className="small notice amber">
                 {direct
-                  ? "Your profile or résumé changed. Review the attachment and save your edits before continuing."
+                  ? "Your profile or résumé changed. Review the current attachment before sending."
                   : "Your profile or this job changed. Review the email and current résumé, then save your edits, or regenerate from the current profile before continuing."}
               </p>
             )}
@@ -597,10 +598,16 @@ function Composer({
             <div className="composer-actions">
               <p className="small muted">
                 {data.connections.gmail
-                  ? `Save to Gmail as: ${data.connections.gmailEmail}`
+                  ? `${direct ? "Send from" : "Save to Gmail as"}: ${data.connections.gmailEmail}`
                   : "Connect Gmail in Settings to choose your sender."}
               </p>
-              {draft.status === "gmail_draft" && !dirty && (
+              {direct && (
+                <p className="small muted">
+                  Review the recipient, message, and any attachment. Clicking Send email approves
+                  and sends this message.
+                </p>
+              )}
+              {!direct && draft.status === "gmail_draft" && !dirty && (
                 <label className="check-row review-check">
                   <input
                     type="checkbox"
@@ -620,51 +627,87 @@ function Composer({
                   onClick={save}
                   busy={busy === "draft.save"}
                 >
-                  <Save size={15} /> Save edits
+                  <Save size={15} /> {direct ? "Save draft" : "Save edits"}
                 </Button>
-                <Button
-                  disabled={!!busy || dirty || invalidContent || !data.connections.gmail}
-                  busy={busy === "draft.gmail"}
-                  onClick={() => act("draft.gmail", { id: draft.id })}
-                >
-                  <Mail size={15} /> Save to Gmail
-                </Button>
-                {draft.status === "approved" && !dirty ? (
+                {direct ? (
                   <Button
                     variant="primary"
                     disabled={
                       !!busy ||
-                      hasErrors ||
-                      !senderMatches ||
+                      invalidContent ||
                       !data.connections.gmail ||
                       data.settings.automationPaused
                     }
-                    busy={busy === "draft.send"}
-                    onClick={() => act("draft.send", { id: draft.id })}
+                    busy={busy === "draft.sendDirect"}
+                    onClick={() =>
+                      act("draft.sendDirect", {
+                        id: draft.id,
+                        version: draft.version,
+                        to,
+                        subject,
+                        body,
+                        attachResume: attach,
+                        resumeId: preview.resumeId,
+                        profileUpdatedAt: data.profile.updatedAt,
+                        senderEmail: data.connections.gmailEmail,
+                        reviewed: true,
+                      })
+                    }
                   >
-                    <Send size={15} /> Send approved email
+                    <Send size={15} /> Send email
                   </Button>
                 ) : (
-                  <Button
-                    variant="primary"
-                    disabled={
-                      !!busy ||
-                      dirty ||
-                      hasErrors ||
-                      !senderMatches ||
-                      !reviewed ||
-                      draft.status !== "gmail_draft"
-                    }
-                    busy={busy === "draft.approve"}
-                    onClick={() =>
-                      act("draft.approve", { id: draft.id, version: draft.version, reviewed })
-                    }
-                  >
-                    <ShieldCheck size={15} /> Approve this draft
-                  </Button>
+                  <>
+                    <Button
+                      disabled={!!busy || dirty || invalidContent || !data.connections.gmail}
+                      busy={busy === "draft.gmail"}
+                      onClick={() => act("draft.gmail", { id: draft.id })}
+                    >
+                      <Mail size={15} /> Save to Gmail
+                    </Button>
+                    {draft.status === "approved" && !dirty ? (
+                      <Button
+                        variant="primary"
+                        disabled={
+                          !!busy ||
+                          hasErrors ||
+                          !senderMatches ||
+                          !data.connections.gmail ||
+                          data.settings.automationPaused
+                        }
+                        busy={busy === "draft.send"}
+                        onClick={() => act("draft.send", { id: draft.id })}
+                      >
+                        <Send size={15} /> Send approved email
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="primary"
+                        disabled={
+                          !!busy ||
+                          dirty ||
+                          hasErrors ||
+                          !senderMatches ||
+                          !reviewed ||
+                          draft.status !== "gmail_draft"
+                        }
+                        busy={busy === "draft.approve"}
+                        onClick={() =>
+                          act("draft.approve", { id: draft.id, version: draft.version, reviewed })
+                        }
+                      >
+                        <ShieldCheck size={15} /> Approve this draft
+                      </Button>
+                    )}
+                  </>
                 )}
               </div>
-              {draft.gmailDraftId && (
+              {direct && data.settings.automationPaused && (
+                <p className="small muted">
+                  Sending is paused. Resume automation in Settings to send.
+                </p>
+              )}
+              {!direct && draft.gmailDraftId && (
                 <a
                   className="text-link small"
                   href="https://mail.google.com/mail/u/0/#drafts"
@@ -719,11 +762,12 @@ function Composer({
             )}
             {!data.connections.gmail && (
               <p className="small muted">
-                Connect Gmail in Settings to save, approve, and send. You can copy or download this
-                draft now.
+                {direct
+                  ? "Connect Gmail in Settings to send. You can save a draft, copy, or download your email now."
+                  : "Connect Gmail in Settings to save, approve, and send. You can copy or download this draft now."}
               </p>
             )}
-            {dirty && <p className="small muted">Save your edits before approval.</p>}
+            {!direct && dirty && <p className="small muted">Save your edits before approval.</p>}
             <p className="small muted">
               These checks cannot verify every claim or guarantee email delivery.
             </p>

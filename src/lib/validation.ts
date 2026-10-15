@@ -74,6 +74,13 @@ export const draftEditSchema = z.object({
   body: text(16000).min(20),
   attachResume: z.boolean(),
 });
+export const directSendSchema = draftEditSchema.extend({
+  to: z.email(),
+  senderEmail: z.email().transform((value) => value.toLowerCase()),
+  resumeId: text(100),
+  profileUpdatedAt: text(100),
+  reviewed: z.literal(true),
+});
 export const profileExtractionSchema = z.object({
   name: z.string(),
   email: z.string(),

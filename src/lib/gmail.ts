@@ -8,6 +8,7 @@ import { scanCompany } from "./jobs";
 import type { Draft, Job, Company } from "./types";
 import { contentChecks, draftInputsChanged } from "./email-checks";
 import { allowedGoogleEmails, isAllowedGoogleEmail } from "./google-config";
+import { directSendSchema } from "./validation";
 interface GmailConnection {
   email: string;
   accessToken: string;
@@ -290,205 +291,267 @@ async function checkCurrent(draft: Draft) {
   }
 }
 export async function saveGmailDraft(draftId: string) {
-  return exclusive(`draft:${draftId}`, async () => {
-    const draft = await get<Draft>("draft", draftId);
-    if (!draft) throw new AppError("Draft not found.", 404);
-    if (["sent", "sending", "uncertain"].includes(draft.status))
+  return exclusive(`draft:${draftId}`, () => saveGmailDraftLocked(draftId));
+}
+// These helpers run only while the caller holds the draft's exclusive lock.
+async function saveGmailDraftLocked(draftId: string, expectedSender?: string) {
+  const draft = await get<Draft>("draft", draftId);
+  if (!draft) throw new AppError("Draft not found.", 404);
+  if (["sent", "sending", "uncertain"].includes(draft.status))
+    throw new AppError("This message cannot be changed while sent or awaiting verification.", 409);
+  validateDraft(draft);
+  const conn = await connection();
+  if (!conn || conn.needsReconnect) throw new AppError("Connect Gmail in Settings.", 409);
+  if (expectedSender && conn.email.toLowerCase() !== expectedSender)
+    throw new AppError(
+      "The connected Gmail account changed. Review the sender and try again.",
+      409,
+    );
+  const attachment = draft.resumeId ? await readResume(draft.resumeId) : null;
+  let replyHeaders: {
+    inReplyTo?: string;
+    references?: string;
+  } = {};
+  let threadId: string | undefined;
+  if (draft.followUpOf) {
+    const original = await get<Draft>("draft", draft.followUpOf);
+    if (!original?.sentMessageId || !original.threadId)
+      throw new AppError("The original sent message is not available for threading.");
+    if (original.gmailAccountEmail !== conn.email.toLowerCase())
       throw new AppError(
-        "This message cannot be changed while sent or awaiting verification.",
+        "Connect the Gmail account that sent the original application before following up.",
         409,
       );
-    validateDraft(draft);
-    const conn = await connection();
-    if (!conn || conn.needsReconnect) throw new AppError("Connect Gmail in Settings.", 409);
-    const attachment = draft.resumeId ? await readResume(draft.resumeId) : null;
-    let replyHeaders: {
-      inReplyTo?: string;
-      references?: string;
-    } = {};
-    let threadId: string | undefined;
-    if (draft.followUpOf) {
-      const original = await get<Draft>("draft", draft.followUpOf);
-      if (!original?.sentMessageId || !original.threadId)
-        throw new AppError("The original sent message is not available for threading.");
-      if (original.gmailAccountEmail !== conn.email.toLowerCase())
-        throw new AppError(
-          "Connect the Gmail account that sent the original application before following up.",
-          409,
-        );
-      const originalMessage = await gmail(
-        conn.email,
-        `messages/${encodeURIComponent(original.sentMessageId)}?format=metadata&metadataHeaders=Message-ID`,
-      );
-      const messageId = (originalMessage.payload?.headers || []).find(
-        (h: { name: string }) => h.name.toLowerCase() === "message-id",
-      )?.value;
-      if (!messageId) throw new AppError("Could not identify the original email thread.");
-      replyHeaders = { inReplyTo: messageId, references: messageId };
-      threadId = original.threadId;
-    }
-    const composer = new MailComposer({
-      from: conn.email,
-      to: draft.to,
-      subject: draft.subject,
-      text: draft.body,
-      ...replyHeaders,
-      attachments: attachment
-        ? [
-            {
-              filename: attachment.meta.name,
-              content: attachment.buffer,
-              contentType: attachment.meta.mime,
-            },
-          ]
-        : [],
-      disableFileAccess: true,
-      disableUrlAccess: true,
-    });
-    const mime = await composer.compile().build();
-    const raw = mime.toString("base64url");
-    const existingId =
-      draft.gmailAccountEmail === conn.email.toLowerCase() ? draft.gmailDraftId : null;
-    const result = await gmail(
+    const originalMessage = await gmail(
       conn.email,
-      existingId ? `drafts/${encodeURIComponent(existingId)}` : "drafts",
-      existingId ? "PUT" : "POST",
-      { message: { raw, ...(threadId ? { threadId } : {}) } },
+      `messages/${encodeURIComponent(original.sentMessageId)}?format=metadata&metadataHeaders=Message-ID`,
     );
-    const saved = await gmail(conn.email, `drafts/${encodeURIComponent(result.id)}?format=raw`);
-    const latest = (await get<Draft>("draft", draftId))!;
-    if (latest.version !== draft.version)
-      throw new AppError("The email changed while saving. Save the latest version again.", 409);
-    await put("draft", {
-      ...latest,
-      status: "gmail_draft",
-      gmailDraftId: result.id,
-      gmailAccountEmail: conn.email.toLowerCase(),
-      gmailRawHash: digest(saved.message.raw),
-      approvedHash: null,
-      approvedAt: null,
-      updatedAt: now(),
-    });
-    await activity("Saved a Gmail draft", draft.subject, "success");
+    const messageId = (originalMessage.payload?.headers || []).find(
+      (h: { name: string }) => h.name.toLowerCase() === "message-id",
+    )?.value;
+    if (!messageId) throw new AppError("Could not identify the original email thread.");
+    replyHeaders = { inReplyTo: messageId, references: messageId };
+    threadId = original.threadId;
+  }
+  const composer = new MailComposer({
+    from: conn.email,
+    to: draft.to,
+    subject: draft.subject,
+    text: draft.body,
+    ...replyHeaders,
+    attachments: attachment
+      ? [
+          {
+            filename: attachment.meta.name,
+            content: attachment.buffer,
+            contentType: attachment.meta.mime,
+          },
+        ]
+      : [],
+    disableFileAccess: true,
+    disableUrlAccess: true,
   });
+  const mime = await composer.compile().build();
+  const raw = mime.toString("base64url");
+  const existingId =
+    draft.gmailAccountEmail === conn.email.toLowerCase() ? draft.gmailDraftId : null;
+  const result = await gmail(
+    conn.email,
+    existingId ? `drafts/${encodeURIComponent(existingId)}` : "drafts",
+    existingId ? "PUT" : "POST",
+    { message: { raw, ...(threadId ? { threadId } : {}) } },
+  );
+  const saved = await gmail(conn.email, `drafts/${encodeURIComponent(result.id)}?format=raw`);
+  const latest = (await get<Draft>("draft", draftId))!;
+  if (latest.version !== draft.version)
+    throw new AppError("The email changed while saving. Save the latest version again.", 409);
+  await put("draft", {
+    ...latest,
+    status: "gmail_draft",
+    gmailDraftId: result.id,
+    gmailAccountEmail: conn.email.toLowerCase(),
+    gmailRawHash: digest(saved.message.raw),
+    approvedHash: null,
+    approvedAt: null,
+    updatedAt: now(),
+  });
+  await activity("Saved a Gmail draft", draft.subject, "success");
 }
 export async function approveDraft(draftId: string, version: number) {
-  return exclusive(`draft:${draftId}`, async () => {
-    const draft = await get<Draft>("draft", draftId);
-    if (!draft) throw new AppError("Draft not found.", 404);
-    if (draft.version !== version)
-      throw new AppError("The draft changed. Review the latest version.", 409);
-    if (!draft.gmailDraftId || draft.status !== "gmail_draft")
-      throw new AppError("Save the latest version to Gmail before approving.", 409);
-    validateDraft(draft);
-    await checkCurrent(draft);
-    const remote = await gmail(
-      draft.gmailAccountEmail!,
-      `drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`,
+  return exclusive(`draft:${draftId}`, () => approveDraftLocked(draftId, version));
+}
+async function approveDraftLocked(draftId: string, version: number) {
+  const draft = await get<Draft>("draft", draftId);
+  if (!draft) throw new AppError("Draft not found.", 404);
+  if (draft.version !== version)
+    throw new AppError("The draft changed. Review the latest version.", 409);
+  if (!draft.gmailDraftId || draft.status !== "gmail_draft")
+    throw new AppError("Save the latest version to Gmail before approving.", 409);
+  validateDraft(draft);
+  await checkCurrent(draft);
+  const remote = await gmail(
+    draft.gmailAccountEmail!,
+    `drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`,
+  );
+  if (digest(remote.message.raw) !== draft.gmailRawHash)
+    throw new AppError(
+      "This draft was edited in Gmail. Review it there, or save your reviewed application version to Gmail again.",
+      409,
     );
-    if (digest(remote.message.raw) !== draft.gmailRawHash)
-      throw new AppError(
-        "This draft was edited in Gmail. Review it there, or save your reviewed application version to Gmail again.",
-        409,
-      );
-    await put("draft", {
-      ...draft,
-      status: "approved",
-      approvedHash: draftHash(draft),
-      approvedAt: now(),
-      updatedAt: now(),
-    });
+  await put("draft", {
+    ...draft,
+    status: "approved",
+    approvedHash: draftHash(draft),
+    approvedAt: now(),
+    updatedAt: now(),
   });
 }
 export async function sendDraft(draftId: string) {
-  return exclusive(`draft:${draftId}`, async () => {
+  return exclusive(`draft:${draftId}`, () => sendDraftLocked(draftId));
+}
+async function sendDraftLocked(draftId: string) {
+  if ((await settings()).automationPaused)
+    throw new AppError("Sending is paused. Resume automation in Settings.", 409);
+  const draft = await get<Draft>("draft", draftId);
+  if (!draft) throw new AppError("Draft not found.", 404);
+  if (draft.status !== "approved" || draft.approvedHash !== draftHash(draft) || !draft.gmailDraftId)
+    throw new AppError("Review and approve the latest Gmail draft before sending.", 409);
+  const company = draft.kind === "direct" ? null : await get<Company>("company", draft.companyId);
+  if (
+    company &&
+    company.source !== "manual" &&
+    (!company.lastChecked || Date.now() - Date.parse(company.lastChecked) > 86400000)
+  )
+    await scanCompany(company.id, true);
+  if (draft.followUpOf) await syncReplies();
+  validateDraft(draft);
+  await checkCurrent(draft);
+  const remote = await gmail(
+    draft.gmailAccountEmail!,
+    `drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`,
+  );
+  if (digest(remote.message.raw) !== draft.gmailRawHash) {
+    await put("draft", { ...draft, status: "gmail_draft", approvedHash: null, approvedAt: null });
+    throw new AppError("The Gmail draft changed after approval. Review it again.", 409);
+  }
+  await transaction(async () => {
+    const latest = (await get<Draft>("draft", draftId))!;
+    await checkCurrent(latest);
     if ((await settings()).automationPaused)
       throw new AppError("Sending is paused. Resume automation in Settings.", 409);
+    if (latest.status !== "approved" || latest.version !== draft.version)
+      throw new AppError("This draft changed or is already being sent.", 409);
+    const drafts = await all<Draft>("draft");
+    const recent = drafts.filter(
+      (d) =>
+        (d.sentAt && Date.parse(d.sentAt) > Date.now() - 86400000) ||
+        ["sending", "uncertain"].includes(d.status),
+    );
+    if (recent.length >= (await settings()).dailySendLimit)
+      throw new AppError("Your rolling 24-hour sending allowance has been reached.", 429);
+    if (
+      (draft.kind === "direct" ? recent : drafts).some(
+        (d) =>
+          d.id !== draft.id &&
+          (draft.kind === "direct"
+            ? d.kind === "direct" &&
+              d.subject === draft.subject &&
+              d.body === draft.body &&
+              d.resumeId === draft.resumeId
+            : d.kind !== "direct" && d.jobId === draft.jobId) &&
+          d.to.toLowerCase() === draft.to.toLowerCase() &&
+          d.followUpOf === draft.followUpOf &&
+          ["sent", "sending", "uncertain"].includes(d.status),
+      )
+    )
+      throw new AppError(
+        draft.kind === "direct"
+          ? "This same email was sent to this recipient in the last 24 hours or is awaiting verification."
+          : "An email for this application has already been sent or is awaiting verification.",
+        409,
+      );
+    await put("draft", { ...latest, status: "sending", updatedAt: now() });
+  });
+  try {
+    const result = await gmail(draft.gmailAccountEmail!, "drafts/send", "POST", {
+      id: draft.gmailDraftId,
+    });
+    if (!result.id) throw new Error("Missing send result");
+    await put("draft", {
+      ...draft,
+      status: "sent",
+      sentMessageId: result.id,
+      threadId: result.threadId,
+      sentAt: now(),
+      updatedAt: now(),
+    });
+    await activity("Email sent", draft.subject, "success");
+  } catch {
+    await put("draft", { ...draft, status: "uncertain", approvedHash: null, updatedAt: now() });
+    throw new AppError(
+      "Gmail's send result could not be confirmed. Check Sent in Gmail before taking any further action; this message will not be retried automatically.",
+      502,
+    );
+  }
+}
+export async function sendDirectEmail(draftId: string, input: unknown) {
+  const parsed = directSendSchema.parse(input);
+  return exclusive(`draft:${draftId}`, async () => {
     const draft = await get<Draft>("draft", draftId);
     if (!draft) throw new AppError("Draft not found.", 404);
-    if (
-      draft.status !== "approved" ||
-      draft.approvedHash !== draftHash(draft) ||
-      !draft.gmailDraftId
-    )
-      throw new AppError("Review and approve the latest Gmail draft before sending.", 409);
-    const company = draft.kind === "direct" ? null : await get<Company>("company", draft.companyId);
-    if (
-      company &&
-      company.source !== "manual" &&
-      (!company.lastChecked || Date.now() - Date.parse(company.lastChecked) > 86400000)
-    )
-      await scanCompany(company.id, true);
-    if (draft.followUpOf) await syncReplies();
-    validateDraft(draft);
-    await checkCurrent(draft);
-    const remote = await gmail(
-      draft.gmailAccountEmail!,
-      `drafts/${encodeURIComponent(draft.gmailDraftId)}?format=raw`,
-    );
-    if (digest(remote.message.raw) !== draft.gmailRawHash) {
-      await put("draft", { ...draft, status: "gmail_draft", approvedHash: null, approvedAt: null });
-      throw new AppError("The Gmail draft changed after approval. Review it again.", 409);
-    }
-    await transaction(async () => {
-      const latest = (await get<Draft>("draft", draftId))!;
-      await checkCurrent(latest);
-      if ((await settings()).automationPaused)
-        throw new AppError("Sending is paused. Resume automation in Settings.", 409);
-      if (latest.status !== "approved" || latest.version !== draft.version)
-        throw new AppError("This draft changed or is already being sent.", 409);
-      const drafts = await all<Draft>("draft");
-      const recent = drafts.filter(
-        (d) =>
-          (d.sentAt && Date.parse(d.sentAt) > Date.now() - 86400000) ||
-          ["sending", "uncertain"].includes(d.status),
-      );
-      if (recent.length >= (await settings()).dailySendLimit)
-        throw new AppError("Your rolling 24-hour sending allowance has been reached.", 429);
-      if (
-        (draft.kind === "direct" ? recent : drafts).some(
-          (d) =>
-            d.id !== draft.id &&
-            (draft.kind === "direct"
-              ? d.kind === "direct" &&
-                d.subject === draft.subject &&
-                d.body === draft.body &&
-                d.resumeId === draft.resumeId
-              : d.kind !== "direct" && d.jobId === draft.jobId) &&
-            d.to.toLowerCase() === draft.to.toLowerCase() &&
-            d.followUpOf === draft.followUpOf &&
-            ["sent", "sending", "uncertain"].includes(d.status),
-        )
-      )
-        throw new AppError(
-          draft.kind === "direct"
-            ? "This same email was sent to this recipient in the last 24 hours or is awaiting verification."
-            : "An email for this application has already been sent or is awaiting verification.",
-          409,
-        );
-      await put("draft", { ...latest, status: "sending", updatedAt: now() });
-    });
-    try {
-      const result = await gmail(draft.gmailAccountEmail!, "drafts/send", "POST", {
-        id: draft.gmailDraftId,
-      });
-      if (!result.id) throw new Error("Missing send result");
-      await put("draft", {
-        ...draft,
-        status: "sent",
-        sentMessageId: result.id,
-        threadId: result.threadId,
-        sentAt: now(),
-        updatedAt: now(),
-      });
-      await activity("Email sent", draft.subject, "success");
-    } catch {
-      await put("draft", { ...draft, status: "uncertain", approvedHash: null, updatedAt: now() });
+    if (draft.kind !== "direct" || draft.companyId || draft.jobId || draft.followUpOf)
+      throw new AppError("Use the application review steps for this email.", 409);
+    if (["sent", "sending", "uncertain"].includes(draft.status))
+      throw new AppError("This email is already sent or awaiting send verification.", 409);
+    if (parsed.version !== draft.version)
       throw new AppError(
-        "Gmail's send result could not be confirmed. Check Sent in Gmail before taking any further action; this message will not be retried automatically.",
-        502,
+        "The email changed in another tab. Review the latest version before sending.",
+        409,
       );
-    }
+    if ((await settings()).automationPaused)
+      throw new AppError("Sending is paused. Resume automation in Settings.", 409);
+    const conn = await connection();
+    if (!conn || conn.needsReconnect) throw new AppError("Connect Gmail in Settings.", 409);
+    if (conn.email.toLowerCase() !== parsed.senderEmail)
+      throw new AppError(
+        "The connected Gmail account changed. Review the sender and try again.",
+        409,
+      );
+    const user = await profile();
+    if (
+      parsed.attachResume &&
+      (!user.resumeId ||
+        parsed.resumeId !== user.resumeId ||
+        parsed.profileUpdatedAt !== user.updatedAt)
+    )
+      throw new AppError(
+        "Your résumé or profile changed. Review the attachment before sending.",
+        409,
+      );
+    // The Send email click approves this exact editor snapshot, including its attachment.
+    const next: Draft = {
+      ...draft,
+      to: parsed.to,
+      subject: parsed.subject,
+      body: parsed.body,
+      resumeId: parsed.attachResume ? user.resumeId : "",
+      resumeName: parsed.attachResume ? user.resumeName : "",
+      evidence: [],
+      reviewNotes: [],
+      model: "Manual",
+      status: "draft",
+      version: draft.version + 1,
+      approvedHash: null,
+      approvedAt: null,
+      gmailRawHash: null,
+      profileUpdatedAt: user.updatedAt,
+      updatedAt: now(),
+    };
+    validateDraft(next);
+    await put("draft", next);
+    await saveGmailDraftLocked(draftId, parsed.senderEmail);
+    await approveDraftLocked(draftId, next.version);
+    await sendDraftLocked(draftId);
   });
 }
 export async function syncReplies(deadline = Date.now() + 200000) {
