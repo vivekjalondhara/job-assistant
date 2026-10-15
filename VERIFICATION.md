@@ -1,3 +1,14 @@
+# Multiple allowed Gmail accounts — 2026-10-15
+
+`GOOGLE_ALLOWED_EMAIL` accepts one address or a comma-separated list. The workspace connects one mailbox at a time and supports disconnecting and choosing another allowed account. Settings continues to offer Disconnect when an account needs reconnection. Drafts record the sender, approvals include that sender, and replies/follow-ups stay with the original mailbox.
+
+- All **61 automated tests passed** against isolated PostgreSQL schemas and MinIO prefixes. The 14 additional tests cover address parsing, invalid/unlisted accounts, verified Google identity and audience, account selection, connect/disconnect/switch, refresh-token ownership, legacy draft ownership, sender changes, reply isolation, follow-up restrictions, removed allowed addresses, and stale refresh/disconnect responses.
+- TypeScript passed. The isolated production build and HTTP smoke passed, including login, workspace rendering, uploads, background jobs, cron authentication, and persistence after restart.
+- Google OAuth and Gmail responses were mocked; no actual Google authorization or email sending occurred. Signed-in browser interaction remains deferred at the user's request.
+- The source and setup instructions are ready. Vercel deployment and the user's actual allowed email values still need to be applied. See **Connect Gmail** in [README.md](README.md).
+
+---
+
 # PDF upload deployment fix — 2026-10-15
 
 The reported two-page PDF parses locally to 7,019 readable characters. Running the parser with only the upload route's traced deployment dependencies reproduced `ReferenceError: DOMMatrix is not defined`: `@napi-rs/canvas` was absent from the package.
