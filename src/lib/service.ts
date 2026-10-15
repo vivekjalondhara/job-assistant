@@ -32,6 +32,7 @@ import {
 import { inferBoard } from "./jobs";
 import { importExistingResearch } from "./imports";
 import { matchJob } from "./matching";
+import { localEmail } from "./local-email";
 import type { AppState, Company, Draft, Job, Usage } from "./types";
 
 export function state(): AppState {
@@ -39,7 +40,11 @@ export function state(): AppState {
   return {
     profile: profile(),
     companies: all("company"),
-    jobs: all<Job>("job").slice(0, 2000),
+    jobs: all<Job>("job").slice(0, 2000).map((job) => ({
+      ...job,
+      match: job.match?.method === "ai" && job.match.profileUpdatedAt === profile().updatedAt
+        ? job.match : matchJob(job, profile()),
+    })),
     drafts: all("draft"),
     settings: settings(),
     activity: all<AppState["activity"][number]>("activity").slice(0, 40),
@@ -263,8 +268,11 @@ export async function action(actionName: string, input: unknown) {
         const job = requireJob(draft.jobId);
         const company = get<Company>("company", draft.companyId)!;
         const before = profile().updatedAt;
-        const style = z.string().max(200).optional().parse(p.style);
-        const result = await writeEmail(job, company, style, draft.body);
+        const version = z.number().int().parse(p.version);
+        if (version !== draft.version)
+          throw new AppError("The draft changed in another tab. Reload before generating.", 409);
+        const style = z.string().trim().max(1000).optional().parse(p.style);
+        const result = await writeEmail(job, company, style, draft.body, !!draft.resumeId);
         const latest = requireDraft(draft.id);
         if (
           profile().updatedAt !== before ||
@@ -283,8 +291,8 @@ export async function action(actionName: string, input: unknown) {
           evidence: result.value.evidence.map((e) => `${e.claim}\nSource: “${e.sourceQuote}”`),
           reviewNotes: result.value.reviewNotes,
           model: result.model,
-          resumeId: user.resumeId,
-          resumeName: user.resumeName,
+          resumeId: draft.resumeId ? user.resumeId : "",
+          resumeName: draft.resumeId ? user.resumeName : "",
           status: "draft",
           version: latest.version + 1,
           approvedHash: null,
@@ -300,6 +308,30 @@ export async function action(actionName: string, input: unknown) {
         };
       });
     }
+    case "draft.template":
+      return exclusive(`draft:${itemId()}`, async () => {
+        const draft = requireDraft(itemId());
+        editable(draft);
+        if (z.number().int().parse(p.version) !== draft.version)
+          throw new AppError("The draft changed in another tab. Reload before generating.", 409);
+        const job = requireJob(draft.jobId);
+        const company = get<Company>("company", job.companyId);
+        const user = profile();
+        if (!user.confirmed || !user.name || !user.experience || !user.skills.length)
+          throw new AppError("Confirm your profile with your name, experience, and skills first.");
+        if (!company) throw new AppError("Company not found.", 404);
+        if (job.status === "closed") throw new AppError("This vacancy is closed. Choose an open role.");
+        if (draft.followUpOf) throw new AppError("The local application template is not for follow-ups.");
+        const resumeId = draft.resumeId ? user.resumeId : "";
+        const result = localEmail(job, company, user, !!resumeId);
+        put("draft", {
+          ...draft, ...result, resumeId, resumeName: resumeId ? user.resumeName : "",
+          model: "Local template", status: "draft", version: draft.version + 1,
+          approvedHash: null, approvedAt: null, gmailRawHash: null,
+          profileUpdatedAt: user.updatedAt, jobUpdatedAt: job.updatedAt, updatedAt: now(),
+        });
+        return { message: "Email written from your profile. Review and personalize it before sending." };
+      });
     case "draft.save":
       return exclusive(`draft:${itemId()}`, async () => {
         const draft = requireDraft(itemId());
