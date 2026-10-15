@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { randomBytes } from "node:crypto";
-import { requireAuth, appUrl, digest, AppError } from "@/lib/security";
+import { requireAuth, appUrl, digest, AppError, setSession } from "@/lib/security";
 import { put } from "@/lib/db";
 import { authorizationUrl } from "@/lib/gmail";
 export async function GET() {
@@ -8,6 +8,8 @@ export async function GET() {
     await requireAuth();
     const state = randomBytes(32).toString("hex");
     const url = authorizationUrl(state);
+    // Also replace older Strict cookies before leaving the app for Google.
+    await setSession();
     put("oauth", { id: digest(state), expires: Date.now() + 600000 });
     (await cookies()).set("folio_oauth", state, {
       httpOnly: true,

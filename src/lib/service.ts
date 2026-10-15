@@ -30,21 +30,25 @@ import {
   sendDraft,
 } from "./gmail";
 import { inferBoard } from "./jobs";
-import { importExistingResearch } from "./imports";
 import { matchJob } from "./matching";
 import { localEmail } from "./local-email";
 import type { AppState, Company, Draft, Job, Usage } from "./types";
 
 export function state(): AppState {
   const conn = connection();
+  const user = profile();
   return {
-    profile: profile(),
+    profile: user,
     companies: all("company"),
-    jobs: all<Job>("job").slice(0, 2000).map((job) => ({
-      ...job,
-      match: job.match?.method === "ai" && job.match.profileUpdatedAt === profile().updatedAt
-        ? job.match : matchJob(job, profile()),
-    })),
+    jobs: all<Job>("job")
+      .slice(0, 2000)
+      .map((job) => ({
+        ...job,
+        match:
+          job.match?.method === "ai" && job.match.profileUpdatedAt === user.updatedAt
+            ? job.match
+            : matchJob(job, user),
+      })),
     drafts: all("draft"),
     settings: settings(),
     activity: all<AppState["activity"][number]>("activity").slice(0, 40),
@@ -196,12 +200,6 @@ export async function action(actionName: string, input: unknown) {
       }
       return { message: `Queued ${count} company checks.` };
     }
-    case "research.import": {
-      const result = importExistingResearch();
-      return {
-        message: `Imported ${result.companies} companies and ${result.jobs} research listings. Recheck the sources before applying.`,
-      };
-    }
     case "job.create": {
       const parsed = jobSchema.parse(p);
       if (!get<Company>("company", parsed.companyId))
@@ -264,6 +262,10 @@ export async function action(actionName: string, input: unknown) {
     case "draft.generate": {
       const draft = requireDraft(itemId());
       editable(draft);
+      if (draft.followUpOf)
+        throw new AppError(
+          "Edit the follow-up directly; application generation is for first emails.",
+        );
       return exclusive(`draft:${draft.id}`, async () => {
         const job = requireJob(draft.jobId);
         const company = get<Company>("company", draft.companyId)!;
@@ -291,6 +293,7 @@ export async function action(actionName: string, input: unknown) {
           evidence: result.value.evidence.map((e) => `${e.claim}\nSource: “${e.sourceQuote}”`),
           reviewNotes: result.value.reviewNotes,
           model: result.model,
+          writingInstructions: style || "",
           resumeId: draft.resumeId ? user.resumeId : "",
           resumeName: draft.resumeId ? user.resumeName : "",
           status: "draft",
@@ -320,17 +323,30 @@ export async function action(actionName: string, input: unknown) {
         if (!user.confirmed || !user.name || !user.experience || !user.skills.length)
           throw new AppError("Confirm your profile with your name, experience, and skills first.");
         if (!company) throw new AppError("Company not found.", 404);
-        if (job.status === "closed") throw new AppError("This vacancy is closed. Choose an open role.");
-        if (draft.followUpOf) throw new AppError("The local application template is not for follow-ups.");
+        if (job.status === "closed")
+          throw new AppError("This vacancy is closed. Choose an open role.");
+        if (draft.followUpOf)
+          throw new AppError("The local application template is not for follow-ups.");
         const resumeId = draft.resumeId ? user.resumeId : "";
         const result = localEmail(job, company, user, !!resumeId);
         put("draft", {
-          ...draft, ...result, resumeId, resumeName: resumeId ? user.resumeName : "",
-          model: "Local template", status: "draft", version: draft.version + 1,
-          approvedHash: null, approvedAt: null, gmailRawHash: null,
-          profileUpdatedAt: user.updatedAt, jobUpdatedAt: job.updatedAt, updatedAt: now(),
+          ...draft,
+          ...result,
+          resumeId,
+          resumeName: resumeId ? user.resumeName : "",
+          model: "Local template",
+          status: "draft",
+          version: draft.version + 1,
+          approvedHash: null,
+          approvedAt: null,
+          gmailRawHash: null,
+          profileUpdatedAt: user.updatedAt,
+          jobUpdatedAt: job.updatedAt,
+          updatedAt: now(),
         });
-        return { message: "Email written from your profile. Review and personalize it before sending." };
+        return {
+          message: "Email written from your profile. Review and personalize it before sending.",
+        };
       });
     case "draft.save":
       return exclusive(`draft:${itemId()}`, async () => {
@@ -345,6 +361,17 @@ export async function action(actionName: string, input: unknown) {
           to: parsed.to,
           subject: parsed.subject,
           body: parsed.body,
+          ...(parsed.body !== draft.body ||
+          parsed.subject !== draft.subject ||
+          draft.profileUpdatedAt !== user.updatedAt
+            ? {
+                evidence: [],
+                reviewNotes: [
+                  "This email was edited manually. Recheck every claim against your confirmed profile.",
+                ],
+                model: "Manual",
+              }
+            : {}),
           resumeId: parsed.attachResume ? user.resumeId : "",
           resumeName: parsed.attachResume ? user.resumeName : "",
           version: draft.version + 1,

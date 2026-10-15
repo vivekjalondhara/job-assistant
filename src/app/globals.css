@@ -1520,6 +1520,48 @@ td select {
   gap: 20px;
   align-items: start;
 }
+.writing-brief {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  margin: 12px 0;
+  font-size: 12px;
+}
+.writing-brief textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: inherit;
+  font: inherit;
+}
+.email-export {
+  padding: 16px 22px;
+  border-top: 1px solid var(--line);
+}
+.draft-checks {
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.draft-checks li + li {
+  margin-top: 10px;
+}
+.job-guidance h4 {
+  margin: 20px 0 10px;
+}
+.job-guidance blockquote {
+  margin: 8px 0;
+  padding: 12px;
+  border-left: 3px solid var(--line);
+}
+.job-guidance summary {
+  cursor: pointer;
+  margin-top: 16px;
+}
 .composer-heading {
   display: flex;
   justify-content: space-between;

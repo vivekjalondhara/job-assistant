@@ -11,10 +11,13 @@ import {
   Check,
   CircleAlert,
   FileCheck2,
+  Copy,
+  Download,
 } from "lucide-react";
 import type { AppState, Draft } from "@/lib/types";
 import type { Act } from "./workspace";
 import { Badge, Button, Empty, External, label, relative, allowNavigation } from "./ui";
+import { applicationChecks, contentChecks } from "@/lib/email-checks";
 
 export function EmailPanel({
   data,
@@ -115,20 +118,51 @@ function Composer({
     [subject, setSubject] = useState(draft.subject),
     [body, setBody] = useState(draft.body),
     [attach, setAttach] = useState(!!draft.resumeId),
-    [reviewed, setReviewed] = useState(false);
+    [reviewed, setReviewed] = useState(false),
+    [instructions, setInstructions] = useState(draft.writingInstructions || ""),
+    [exportNotice, setExportNotice] = useState("");
   const company = data.companies.find((c) => c.id === draft.companyId),
     job = data.jobs.find((j) => j.id === draft.jobId);
   const locked = ["sent", "sending", "uncertain"].includes(draft.status);
   const inputsChanged =
     draft.profileUpdatedAt !== data.profile.updatedAt || draft.jobUpdatedAt !== job?.updatedAt;
-  const dirty =
+  const edited =
     !locked &&
-    (inputsChanged ||
-      to !== draft.to ||
+    (to !== draft.to ||
       subject !== draft.subject ||
       body !== draft.body ||
       attach !== !!draft.resumeId);
+  const dirty = !locked && (inputsChanged || edited);
   const words = body.trim() ? body.trim().split(/\s+/).length : 0;
+  const preview = {
+    ...draft,
+    to,
+    subject,
+    body,
+    resumeId: attach ? (dirty ? data.profile.resumeId : draft.resumeId) : "",
+  };
+  const checks = applicationChecks(preview, data.profile, job, company);
+  const issues = checks.filter((check) => check.status !== "pass");
+  const hasErrors = issues.some((check) => check.status === "error");
+  const invalidContent = contentChecks(preview).some((check) => check.status === "error");
+  const exportText = `To: ${to}\nSubject: ${subject}\n\n${body}`;
+  async function copyEmail() {
+    try {
+      await navigator.clipboard.writeText(exportText);
+      setExportNotice("Email copied. Attach your résumé separately when sending elsewhere.");
+    } catch {
+      setExportNotice("Clipboard access was unavailable. Use Download text instead.");
+    }
+  }
+  function downloadEmail() {
+    const url = URL.createObjectURL(new Blob([exportText], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "application-email.txt";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setExportNotice("Email downloaded. Attach your résumé separately when sending elsewhere.");
+  }
   const save = () =>
     act("draft.save", {
       id: draft.id,
@@ -203,7 +237,7 @@ function Composer({
             setBody(e.target.value);
             setReviewed(false);
           }}
-          placeholder="Your introduction starts here. Write in your own words, or generate a personal draft with OpenRouter."
+          placeholder="Write your introduction, use your confirmed profile to draft locally, or ask AI to tailor it."
         />
         <div className="compose-bottom">
           <label className="check-row">
@@ -229,26 +263,69 @@ function Composer({
             {inputsChanged && (
               <p className="small notice amber">
                 Your profile or this job changed. Review the email and current résumé, then save
-                your edits before continuing.
+                your edits, or regenerate from the current profile before continuing.
               </p>
             )}
             <span className="small muted">
               <Sparkles size={14} /> Writing assistant
             </span>
+            <label className="writing-brief">
+              <span>Writing instructions for AI (optional)</span>
+              <textarea
+                value={instructions}
+                onChange={(event) => setInstructions(event.target.value)}
+                maxLength={1000}
+                rows={3}
+                disabled={!!busy || !!draft.followUpOf}
+                placeholder="For example: Keep it under 120 words. Focus on my API project. Use a concise, friendly tone."
+              />
+            </label>
+            <p className="small muted">
+              AI uses the saved job description and confirmed profile. Instructions control wording
+              and emphasis; every claim still needs your review.
+            </p>
             <div className="button-row">
               <Button
                 variant="ghost"
                 disabled={
                   !!busy ||
-                  dirty ||
+                  edited ||
+                  !data.profile.confirmed ||
+                  !!draft.followUpOf ||
+                  job?.status === "closed"
+                }
+                busy={busy === "draft.template"}
+                onClick={() => {
+                  if (
+                    !body.trim() ||
+                    window.confirm("Replace this saved email with a new draft from your profile?")
+                  )
+                    act("draft.template", { id: draft.id, version: draft.version });
+                }}
+              >
+                Write from my profile
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={
+                  !!busy ||
+                  edited ||
                   !data.connections.openrouter ||
                   !data.profile.confirmed ||
-                  !!draft.followUpOf
+                  !!draft.followUpOf ||
+                  job?.status === "closed"
                 }
                 busy={busy === "draft.generate"}
-                onClick={() => act("draft.generate", { id: draft.id })}
+                onClick={() => {
+                  if (!body.trim() || window.confirm("Replace this saved email with an AI draft?"))
+                    act("draft.generate", {
+                      id: draft.id,
+                      version: draft.version,
+                      style: instructions,
+                    });
+                }}
               >
-                {body ? "Regenerate" : "Generate email"}
+                {body ? "Rewrite with AI" : "Generate with AI"}
               </Button>
               {body && (
                 <>
@@ -258,7 +335,8 @@ function Composer({
                     onClick={() =>
                       act("draft.generate", {
                         id: draft.id,
-                        style: "Make it shorter, around 90 words.",
+                        version: draft.version,
+                        style: `${instructions.slice(0, 850)}\nMake it shorter, around 90 words.`,
                       })
                     }
                   >
@@ -270,8 +348,8 @@ function Composer({
                     onClick={() =>
                       act("draft.generate", {
                         id: draft.id,
-                        style:
-                          "Make the wording sound more natural and conversational, while staying professional.",
+                        version: draft.version,
+                        style: `${instructions.slice(0, 850)}\nMake the wording sound more natural and conversational, while staying professional.`,
                       })
                     }
                   >
@@ -280,15 +358,15 @@ function Composer({
                 </>
               )}
             </div>
-            {dirty && (
+            {edited && (
               <p className="small muted">
                 Save your edits before asking for a rewrite or syncing to Gmail.
               </p>
             )}
             {!data.connections.openrouter && (
               <p className="small muted">
-                Configure OpenRouter in Settings to generate emails. You can write and save an email
-                manually.
+                Write from your profile without an API key. Configure OpenRouter in Settings for AI
+                rewriting and custom instructions.
               </p>
             )}
           </div>
@@ -339,7 +417,7 @@ function Composer({
                   <Save size={15} /> Save edits
                 </Button>
                 <Button
-                  disabled={!!busy || dirty || !body.trim() || !to || !data.connections.gmail}
+                  disabled={!!busy || dirty || invalidContent || !data.connections.gmail}
                   busy={busy === "draft.gmail"}
                   onClick={() => act("draft.gmail", { id: draft.id })}
                 >
@@ -348,7 +426,12 @@ function Composer({
                 {draft.status === "approved" && !dirty ? (
                   <Button
                     variant="primary"
-                    disabled={!!busy || data.settings.automationPaused}
+                    disabled={
+                      !!busy ||
+                      hasErrors ||
+                      !data.connections.gmail ||
+                      data.settings.automationPaused
+                    }
                     busy={busy === "draft.send"}
                     onClick={() => act("draft.send", { id: draft.id })}
                   >
@@ -357,7 +440,9 @@ function Composer({
                 ) : (
                   <Button
                     variant="primary"
-                    disabled={!!busy || dirty || !reviewed || draft.status !== "gmail_draft"}
+                    disabled={
+                      !!busy || dirty || hasErrors || !reviewed || draft.status !== "gmail_draft"
+                    }
                     busy={busy === "draft.approve"}
                     onClick={() =>
                       act("draft.approve", { id: draft.id, version: draft.version, reviewed })
@@ -380,8 +465,56 @@ function Composer({
             </div>
           )
         )}
+        <div className="email-export">
+          <div className="button-row">
+            <Button disabled={!body.trim()} onClick={copyEmail}>
+              <Copy size={15} /> Copy email
+            </Button>
+            <Button disabled={!body.trim()} onClick={downloadEmail}>
+              <Download size={15} /> Download text
+            </Button>
+          </div>
+          {exportNotice && (
+            <p className="small muted" role="status">
+              {exportNotice}
+            </p>
+          )}
+        </div>
       </section>
       <aside className="email-context" aria-label="Email context">
+        {!locked && (
+          <section className="panel context-card" aria-label="Application checks">
+            <span className="eyebrow">BEFORE YOU SEND</span>
+            <p>
+              <Badge tone={hasErrors ? "amber" : "green"}>
+                {hasErrors ? "Needs attention" : "Content checks passed"}
+              </Badge>
+            </p>
+            {issues.length ? (
+              <ul className="draft-checks">
+                {issues.map((check) => (
+                  <li key={check.id}>
+                    <strong>{check.status === "error" ? "Fix" : "Review"}:</strong> {check.message}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="small">
+                Automated checks passed. Read every claim and confirm the job is still open.
+              </p>
+            )}
+            {!data.connections.gmail && (
+              <p className="small muted">
+                Connect Gmail in Settings to save, approve, and send. You can copy or download this
+                draft now.
+              </p>
+            )}
+            {dirty && <p className="small muted">Save your edits before approval.</p>}
+            <p className="small muted">
+              These checks cannot verify every claim or guarantee email delivery.
+            </p>
+          </section>
+        )}
         <section className="panel context-card">
           <span className="eyebrow">THE OPPORTUNITY</span>
           <h2>{job?.title}</h2>
@@ -419,7 +552,7 @@ function Composer({
             ))
           ) : (
             <p className="small muted">
-              Supporting profile quotes will appear here after AI generation. Review all claims,
+              Supporting profile quotes will appear here after generation. Review all claims,
               including manual edits.
             </p>
           )}

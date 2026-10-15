@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { zipSync, strToU8 } from "fflate";
 import { z } from "zod";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { EmailPanel } from "../src/components/email-panel";
 
 const directory = mkdtempSync(path.join(tmpdir(), "folio-tests-"));
 process.env.DATA_DIR = directory;
@@ -14,9 +17,13 @@ const security = await import("../src/lib/security");
 const { matchJob } = await import("../src/lib/matching");
 const { inferBoard, scanCompany } = await import("../src/lib/jobs");
 const { importCsv } = await import("../src/lib/imports");
-const { action } = await import("../src/lib/service");
+const { action, state } = await import("../src/lib/service");
 const { approveDraft, sendDraft, draftHash, validateDraft } = await import("../src/lib/gmail");
-const { generate } = await import("../src/lib/ai");
+const { generate, writeEmail } = await import("../src/lib/ai");
+const { jobInsights, mentions } = await import("../src/lib/job-insights");
+const { contentChecks, applicationChecks } = await import("../src/lib/email-checks");
+const { localEmail } = await import("../src/lib/local-email");
+const { profileSchema } = await import("../src/lib/validation");
 const { uploadResume, readResume } = await import("../src/lib/files");
 const { emptyProfile } = await import("../src/lib/types");
 type Draft = import("../src/lib/types").Draft;
@@ -358,4 +365,326 @@ test("TXT and DOCX uploads extract text, keep original attachments, and require 
   });
   await uploadResume(new File([new Uint8Array(archive)], "resume.docx"));
   assert.match(store.profile().resumeText, /Node.js API/);
+});
+
+test("matching measures job skill coverage without penalizing unrelated candidate skills", () => {
+  const { p, job } = fixtures();
+  const original = matchJob(job, p)!;
+  assert.equal(
+    matchJob(job, { ...p, skills: [...p.skills, "Python", "Docker", "Figma"] })!.score,
+    original.score,
+  );
+  const moreRequirements = matchJob(
+    { ...job, description: `${job.description} AWS and Kubernetes required.` },
+    p,
+  )!;
+  assert.ok(moreRequirements.score < original.score);
+  assert.match(moreRequirements.gaps.join(" "), /AWS, Kubernetes/);
+});
+
+test("skill aliases, duplicate skills, and punctuation do not create false keyword matches", () => {
+  const { p, job } = fixtures();
+  const insights = jobInsights(
+    { ...job, description: "Use NodeJS with Postgres, C++ and C#." },
+    { ...p, skills: ["node.js", "Node.js", "PostgreSQL"] },
+  );
+  assert.deepEqual(insights.supported, ["Node.js", "PostgreSQL"]);
+  assert.deepEqual(insights.missing, ["C++", "C#"]);
+  assert.equal(mentions("JavaScript and JavaBeans", "Java"), false);
+  assert.equal(mentions("C++ and C#", "C"), false);
+  assert.equal(mentions("ReactNative", "React"), false);
+  assert.equal(mentions("We use C++, C# and .NET.", "C++"), true);
+});
+
+test("guidance selects relevant exact work examples and quotes requirements without inventing qualifications", () => {
+  const { p, job } = fixtures();
+  const insights = jobInsights(
+    {
+      ...job,
+      description: `${job.description}\nAWS required.\nMust have 5+ years of experience and work authorization.`,
+    },
+    {
+      ...p,
+      experience:
+        "Designed event posters.\nBuilt a Node.js API with PostgreSQL.\nI have no AWS experience.",
+    },
+  );
+  assert.deepEqual(insights.evidence, ["Built a Node.js API with PostgreSQL."]);
+  assert.ok(insights.missing.includes("AWS"));
+  assert.ok(!insights.supported.includes("AWS"));
+  assert.ok(insights.requirements.some((requirement) => requirement.includes("5+ years")));
+  assert.match(insights.suggestions.join(" "), /only if you have that experience/);
+});
+
+test("an unrelated engineering role is not a preferred role match just because it says engineer", () => {
+  const { p, job } = fixtures();
+  const result = matchJob(
+    { ...job, title: "Mechanical engineer" },
+    { ...p, targetRoles: ["Backend engineer"] },
+  )!;
+  assert.ok(result.gaps.some((gap) => gap.includes("preferred roles")));
+});
+
+test("local email uses the role, company, confirmed evidence, and selected attachment without external requests", async () => {
+  const { draft, job, company, p } = fixtures();
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Local generation must not call a provider");
+  };
+  await action("draft.template", { id: draft.id, version: draft.version });
+  const generated = store.get<Draft>("draft", draft.id)!;
+  assert.match(generated.subject, /Backend engineer/);
+  assert.ok(generated.body.includes(company.name));
+  assert.ok(generated.body.includes(p.experience));
+  assert.equal(generated.model, "Local template");
+  assert.equal(generated.version, draft.version + 1);
+  assert.equal(generated.status, "draft");
+  assert.equal(generated.approvedHash, null);
+  assert.equal(generated.gmailRawHash, null);
+  assert.equal(requests, 0);
+  assert.ok(!generated.body.includes("attached"));
+  assert.match(localEmail(job, company, p, true).body, /attached my résumé/);
+});
+
+test("local drafting rejects stale editors, unconfirmed facts, closed jobs, and follow-ups", async () => {
+  const { p, draft, job } = fixtures();
+  await assert.rejects(action("draft.template", { id: draft.id, version: 99 }), /another tab/);
+  store.put("profile", { ...p, confirmed: false });
+  await assert.rejects(
+    action("draft.template", { id: draft.id, version: 1 }),
+    /Confirm your profile/,
+  );
+  store.put("profile", p);
+  store.put("job", { ...job, status: "closed" });
+  await assert.rejects(action("draft.template", { id: draft.id, version: 1 }), /closed/);
+  store.put("job", job);
+  store.put("draft", { ...draft, followUpOf: store.id() });
+  await assert.rejects(action("draft.template", { id: draft.id, version: 1 }), /follow-ups/);
+  assert.equal(store.get<Draft>("draft", draft.id)?.body, draft.body);
+});
+
+test("local drafting cannot change sent, sending, or uncertain messages", async () => {
+  const { draft } = fixtures();
+  for (const status of ["sent", "sending", "uncertain"]) {
+    store.put("draft", { ...draft, status });
+    await assert.rejects(
+      action("draft.template", { id: draft.id, version: 1 }),
+      /cannot be edited/,
+    );
+    assert.equal(store.get<Draft>("draft", draft.id)?.status, status);
+    assert.equal(store.get<Draft>("draft", draft.id)?.body, draft.body);
+  }
+});
+
+test("draft checks detect subject placeholders, missing attachments, malformed recipients, and header injection", () => {
+  const { draft } = fixtures();
+  assert.equal(contentChecks(draft).filter((c) => c.status === "error").length, 0);
+  for (const body of [
+    "Please find my CV attached.",
+    "My résumé is enclosed for your review.",
+    "Hi {{recruiter}}, please review my application.",
+  ]) {
+    assert.throws(() => validateDraft({ ...draft, body }));
+  }
+  assert.throws(
+    () => validateDraft({ ...draft, subject: "Application for [Job Title]" }),
+    /placeholders/,
+  );
+  assert.throws(
+    () => validateDraft({ ...draft, to: "one@example.com,two@example.com" }),
+    /recipient/,
+  );
+  assert.throws(
+    () => validateDraft({ ...draft, subject: "Hi\r\nBcc: leak@example.com" }),
+    /one-line/,
+  );
+  assert.doesNotThrow(() =>
+    validateDraft({ ...draft, resumeId: "resume", body: "Please find my CV attached." }),
+  );
+});
+
+test("application checks flag changed facts, missing contact confirmation, and resolved applications", () => {
+  const { draft, p, job, company } = fixtures();
+  assert.equal(
+    applicationChecks(draft, p, job, company).filter((c) => c.status === "error").length,
+    0,
+  );
+  const checks = applicationChecks(
+    draft,
+    { ...p, updatedAt: "changed" },
+    { ...job, applicationStatus: "rejected" },
+    { ...company, contactConfirmed: false },
+  );
+  assert.deepEqual(
+    checks.filter((c) => c.status === "error").map((c) => c.id),
+    ["freshness", "contact", "resolved"],
+  );
+});
+
+test("unconfirmed recruitment contacts and missing sources block approval on the server", async () => {
+  const { company, draft } = fixtures();
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Gmail must not be reached");
+  };
+  for (const changed of [
+    { contactConfirmed: false },
+    { contactSource: "" },
+    { email: "different@example.com" },
+  ]) {
+    store.put("company", { ...company, ...changed });
+    await assert.rejects(approveDraft(draft.id, draft.version), /Confirm this recruitment address/);
+  }
+  assert.equal(requests, 0);
+  assert.equal(store.get<Draft>("draft", draft.id)?.approvedHash, null);
+});
+
+test("contact changes after approval prevent sending", async () => {
+  const { company, draft } = fixtures();
+  const sends = gmailMock();
+  await approveDraft(draft.id, draft.version);
+  store.put("company", { ...company, contactConfirmed: false });
+  await assert.rejects(sendDraft(draft.id), /Confirm this recruitment address/);
+  assert.equal(sends(), 0);
+});
+
+test("manual changes clear generated evidence rather than attributing new claims to old quotes", async () => {
+  const { draft } = fixtures();
+  store.put("draft", { ...draft, evidence: ["Old claim and quote"], model: "test/model" });
+  await action("draft.save", {
+    id: draft.id,
+    version: 1,
+    to: draft.to,
+    subject: draft.subject,
+    body: `${draft.body}\nI am available for a call.`,
+    attachResume: false,
+  });
+  const saved = store.get<Draft>("draft", draft.id)!;
+  assert.deepEqual(saved.evidence, []);
+  assert.equal(saved.model, "Manual");
+  assert.match(saved.reviewNotes.join(" "), /edited manually/);
+});
+
+function aiEmailResponse(
+  quote: string,
+  body = "Hi Hiring Team,\n\nI built a Node.js API with PostgreSQL and would welcome a conversation about this role.\n\nBest regards,\nTest Candidate",
+) {
+  return Response.json({
+    model: "test/model",
+    choices: [
+      {
+        message: {
+          content: JSON.stringify({
+            subject: "Backend engineer application",
+            body,
+            evidence: [{ claim: "Built a Node.js API with PostgreSQL.", sourceQuote: quote }],
+            reviewNotes: [],
+          }),
+        },
+      },
+    ],
+  });
+}
+
+test("AI receives the job, profile, bounded writing brief, and actual attachment choice", async () => {
+  const { draft, p, job } = fixtures();
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  store.put("profile", { ...p, resumeId: "available-but-not-selected", resumeName: "resume.pdf" });
+  let called = false;
+  global.fetch = async (_url, init) => {
+    called = true;
+    const request = JSON.parse(String(init?.body));
+    const input = JSON.parse(request.messages[1].content);
+    assert.equal(input.resumeAttached, false);
+    assert.equal(input.job.description, job.description);
+    assert.equal(input.requestedStyle, "Focus on my API project; keep it concise.");
+    assert.ok(input.candidateEvidence.includes(p.experience));
+    assert.match(request.messages[0].content, /cannot authorize unsupported claims/);
+    assert.match(request.messages[0].content, /untrusted data/);
+    return aiEmailResponse(p.experience);
+  };
+  await action("draft.generate", {
+    id: draft.id,
+    version: 1,
+    style: "Focus on my API project; keep it concise.",
+  });
+  assert.equal(called, true);
+  assert.equal(store.get<Draft>("draft", draft.id)?.resumeId, "");
+  assert.equal(store.get<Draft>("draft", draft.id)?.model, "test/model");
+  assert.equal(
+    store.get<Draft>("draft", draft.id)?.writingInstructions,
+    "Focus on my API project; keep it concise.",
+  );
+});
+
+test("invalid AI evidence and missing promised attachments leave the previous email untouched", async () => {
+  const { draft, p, company, job } = fixtures();
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async () => aiEmailResponse("Managed a team of 50 engineers.");
+  await assert.rejects(action("draft.generate", { id: draft.id, version: 1 }), /valid evidence/);
+  assert.equal(store.get<Draft>("draft", draft.id)?.body, draft.body);
+  global.fetch = async () =>
+    aiEmailResponse(
+      p.experience,
+      "I built a Node.js API with PostgreSQL. Please find my CV attached.",
+    );
+  await assert.rejects(writeEmail(job, company, undefined, undefined, false), /attachment/);
+  assert.equal(store.get<Draft>("draft", draft.id)?.version, 1);
+});
+
+test("AI generation rejects stale versions and oversized instructions before making a paid request", async () => {
+  const { draft } = fixtures();
+  let requests = 0;
+  global.fetch = async () => {
+    requests++;
+    throw new Error("Provider must not be reached");
+  };
+  await assert.rejects(action("draft.generate", { id: draft.id, version: 0 }), /another tab/);
+  await assert.rejects(
+    action("draft.generate", { id: draft.id, version: 1, style: "a".repeat(1001) }),
+  );
+  assert.equal(requests, 0);
+});
+
+test("profile validation rejects blank skills and normalizes case-insensitive duplicates", () => {
+  const { p } = fixtures();
+  assert.equal(profileSchema.safeParse({ ...p, skills: ["   "] }).success, false);
+  assert.deepEqual(
+    profileSchema.parse({ ...p, skills: ["Node.js", " node.js ", "PostgreSQL"] }).skills,
+    ["Node.js", "PostgreSQL"],
+  );
+});
+
+test("an empty stale draft can still be written from current profile facts while approval stays blocked", async () => {
+  const { draft, p } = fixtures();
+  store.put("draft", { ...draft, body: "", status: "draft" });
+  store.put("profile", {
+    ...p,
+    updatedAt: "changed-profile",
+    experience: "Built a Node.js API for scheduling interviews.",
+  });
+  const markup = renderToStaticMarkup(
+    createElement(EmailPanel, {
+      data: state(),
+      selectedId: draft.id,
+      setSelectedId: () => {},
+      act: async () => null,
+      busy: "",
+      onFindJobs: () => {},
+    }),
+  );
+  const buttons = [...markup.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)];
+  const write = buttons.find((button) => button[2].includes("Write from my profile"));
+  assert.ok(write, "Local drafting control is available");
+  assert.ok(!write[1].includes("disabled"), "Changed profile does not trap an empty draft");
+  const approve = buttons.find((button) => button[2].includes("Approve this draft"));
+  assert.ok(approve?.[1].includes("disabled"), "Stale content cannot be approved");
+  await action("draft.template", { id: draft.id, version: 1 });
+  const generated = store.get<Draft>("draft", draft.id)!;
+  assert.match(generated.body, /scheduling interviews/);
+  assert.equal(generated.profileUpdatedAt, "changed-profile");
 });

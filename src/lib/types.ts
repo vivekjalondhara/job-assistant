@@ -82,6 +82,7 @@ export interface Draft {
   evidence: string[];
   reviewNotes: string[];
   model: string;
+  writingInstructions?: string;
   status: DraftStatus;
   version: number;
   approvedHash: string | null;

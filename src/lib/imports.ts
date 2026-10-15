@@ -1,6 +1,4 @@
 import { parse } from "csv-parse/sync";
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 import { all, put, now, id, activity, transaction } from "./db";
 import type { Company, Job } from "./types";
 import { inferBoard } from "./jobs";
@@ -122,10 +120,4 @@ export function importCsv(csv: string, includeJobs = false) {
     "success",
   );
   return { companies: companyCount, jobs: jobCount };
-}
-export function importExistingResearch() {
-  const file = path.resolve(process.cwd(), "../product_only_top_20_jobs.csv");
-  if (!existsSync(file))
-    throw new AppError("The local research CSV was not found. Use Import CSV instead.");
-  return importCsv(readFileSync(file, "utf8"), true);
 }

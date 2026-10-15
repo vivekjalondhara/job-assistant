@@ -11,7 +11,15 @@ export const profileSchema = z.object({
   email: z.union([z.literal(""), z.email()]),
   headline: text(240),
   location: text(160),
-  skills: z.array(text(100)).max(100),
+  skills: z
+    .array(text(100).min(1))
+    .max(100)
+    .transform((items) =>
+      items.filter(
+        (item, index) =>
+          items.findIndex((other) => other.toLowerCase() === item.toLowerCase()) === index,
+      ),
+    ),
   experience: text(16000),
   projects: text(16000),
   education: text(6000),

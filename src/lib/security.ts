@@ -83,7 +83,9 @@ export async function setSession() {
     .sign(secret());
   (await cookies()).set("folio_session", token, {
     httpOnly: true,
-    sameSite: "strict",
+    // Google's top-level callback and its redirects must retain this session.
+    // State-changing API requests still require assertSameOrigin().
+    sameSite: "lax",
     secure: appUrl().startsWith("https:"),
     path: "/",
     maxAge: 7 * 86400,

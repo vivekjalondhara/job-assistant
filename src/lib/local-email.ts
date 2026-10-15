@@ -19,16 +19,28 @@ export function localEmail(job: Job, company: Company, profile: Profile, attachR
     `${formal ? "Kind regards" : "Best regards"},\n${profile.signature || profile.name}`,
   ].join("\n\n");
   return {
-    subject: `Application for ${job.title} — ${profile.name}`.replace(/[\r\n]+/g, " ").slice(0, 250),
+    subject: `Application for ${job.title} — ${profile.name}`
+      .replace(/[\r\n]+/g, " ")
+      .slice(0, 250),
     body,
     evidence: [
       ...examples.map((quote) => `Work example\nSource: “${quote}”`),
-      ...(insights.supported.length ? [`Skills mentioned in your confirmed profile: ${insights.supported.slice(0, 4).join(", ")}`] : []),
+      ...(insights.supported.length
+        ? [
+            `Skills mentioned in your confirmed profile: ${insights.supported.slice(0, 4).join(", ")}`,
+          ]
+        : []),
     ],
     reviewNotes: [
       "Written locally from your confirmed profile. Check the wording and all claims before sending.",
-      ...(!examples.length ? ["Add a relevant work example to your profile, or personalize this draft before sending."] : []),
-      ...(insights.missing.length ? [`The listing also mentions ${insights.missing.join(", ")}; these are not evidenced in your profile.`] : []),
+      ...(!examples.length
+        ? ["Add a relevant work example to your profile, or personalize this draft before sending."]
+        : []),
+      ...(insights.missing.length
+        ? [
+            `The listing also mentions ${insights.missing.join(", ")}; these are not evidenced in your profile.`,
+          ]
+        : []),
     ],
   };
 }

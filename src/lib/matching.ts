@@ -17,7 +17,10 @@ export function matchJob(
   const roleMatch =
     !p.targetRoles.length ||
     p.targetRoles.some((role) => {
-      const words = tokens(role).filter((word) => !["senior", "junior", "lead", "staff", "engineer", "developer", "manager"].includes(word));
+      const words = tokens(role).filter(
+        (word) =>
+          !["senior", "junior", "lead", "staff", "engineer", "developer", "manager"].includes(word),
+      );
       return (words.length ? words : tokens(role)).every((t) => titleWords.has(t));
     });
   const locationMatch =
@@ -31,7 +34,9 @@ export function matchJob(
   );
   const gaps: string[] = [];
   if (insights.missing.length)
-    gaps.push(`Mentioned in the listing but not evidenced in your profile: ${insights.missing.join(", ")}. Check which are mandatory.`);
+    gaps.push(
+      `Mentioned in the listing but not evidenced in your profile: ${insights.missing.join(", ")}. Check which are mandatory.`,
+    );
   if (p.remoteOnly && !job.remote) {
     score = Math.min(score, 35);
     gaps.push("Remote work is not confirmed for this listing.");
@@ -39,7 +44,9 @@ export function matchJob(
   if (!roleMatch) gaps.push("The job title does not clearly match your preferred roles.");
   if (!locationMatch) gaps.push("Location needs review against your preferences.");
   const reasons = found.length
-    ? [`Your profile supports ${found.length} of ${insights.mentioned.length} recognized skills mentioned in the vacancy: ${found.join(", ")}.`]
+    ? [
+        `Your profile supports ${found.length} of ${insights.mentioned.length} recognized skills mentioned in the vacancy: ${found.join(", ")}.`,
+      ]
     : ["No exact skill mentions found. Review the description for related experience."];
   if (roleMatch && p.targetRoles.length)
     reasons.push("The title overlaps with your preferred roles.");

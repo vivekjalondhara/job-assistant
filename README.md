@@ -23,11 +23,11 @@ For development, run `npm run dev` instead of the build/start commands. Both `de
 ## Use it, one step at a time
 
 1. **My profile:** upload a PDF, DOCX, or TXT résumé (up to 8 MB). Fill your skills, experience, projects, target roles, location preferences, and signature. AI extraction is optional. Check the facts and confirm your profile. Image-only/scanned résumés need conversion to searchable text first.
-2. **Companies:** add companies manually or import a CSV. Supported column names include `Company`, `Website`, `Careers URL`, `Recruitment email`, and `Contact source`. Importing does not verify an email address. The **Import local research** button reads the existing `../product_only_top_20_jobs.csv` without changing that file.
+2. **Companies:** add companies manually or upload a CSV with **Import CSV**. Supported column names include `Company`, `Website`, `Careers URL`, `Recruitment email`, and `Contact source`. Importing does not verify an email address.
 3. **Find vacancies:** enter an official Ashby, Greenhouse, or Lever board URL and run a company check. Other careers sites support manual job entry. Daily scheduled checks can be enabled in Settings.
 4. **Review matches:** keyword scores work locally after profile confirmation. With OpenRouter configured, open a job and request AI analysis for reasons, gaps, and unknowns. Scores rank fit; they are not hiring probabilities.
 5. **Choose a contact:** the company editor can find published email addresses in saved job descriptions. Review their context and purpose, then confirm an appropriate recruitment contact. When no address is available, use the company's application link.
-6. **Prepare an email:** open a job and choose **Prepare email**. Generate a natural draft with OpenRouter, make it shorter, adjust the tone, or write it yourself. Review the quoted profile evidence, recipient, subject, and résumé. Save edits locally.
+6. **Prepare an email:** open a job, review **Tailor your application**, and choose **Prepare email**. Use **Write from my profile** without an API key, or **Generate with AI** with optional writing instructions. Review the quoted evidence and **Before you send** checks, then save edits locally. Copy or download the text if you use another email client; attach your résumé separately there. See [PROMPTS.md](PROMPTS.md) for the complete workflow, sample writing instructions, prompt source, and limitations.
 7. **Save to Gmail:** once connected, save the reviewed email as a real Gmail draft. The attachment is the selected résumé. Check the review box and approve that exact version. Edits clear approval.
 8. **Send:** click **Send approved email**. The application rechecks the approved draft against Gmail, current profile/job facts, duplicate sends, and your sending allowance. Supported stale vacancy feeds are rechecked before sending. Sending is always an explicit action.
 9. **Track:** view emails and application status separately. Sending an email does not mark an employer's application form as submitted. Mark formal submissions and interviews yourself. Known Gmail application threads are checked for replies and delivery notices.
@@ -70,6 +70,8 @@ The monthly setting stops new calls once recorded usage reaches the chosen amoun
    ```
 
 6. Restart the app and worker. Open **Settings → Connect Gmail**, choose the allowed account, and grant the requested permissions.
+
+If Google returns you to Folio's password screen, update and restart the app, sign in, and start **Connect Gmail** again. The session must use `SameSite=Lax` so it survives Google's redirect; starting a new connection replaces older session cookies. Always open `http://localhost:3210` rather than `127.0.0.1`, matching `APP_URL` and the registered callback. A failed connection now stays in the workspace and shows the reason, such as missing Gmail permissions or choosing a different account. Select both Gmail permissions on Google's consent screen. Server logs record a sanitized failure stage without OAuth codes or tokens.
 
 The requested scopes are `openid`, `email`, `gmail.compose` (drafts and sending), and `gmail.readonly` (draft integrity and tracked thread reads). Google permissions are broader than the app's thread-checking behavior. The app rejects a Google identity that differs from `GOOGLE_ALLOWED_EMAIL`.
 

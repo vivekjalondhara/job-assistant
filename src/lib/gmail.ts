@@ -6,6 +6,7 @@ import { readResume } from "./files";
 import { exclusive } from "./ai";
 import { scanCompany } from "./jobs";
 import type { Draft, Job, Company } from "./types";
+import { contentChecks } from "./email-checks";
 
 interface GmailConnection {
   email: string;
@@ -167,22 +168,20 @@ export const draftHash = (draft: Draft) =>
     }),
   );
 export function validateDraft(draft: Draft) {
-  if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(draft.to))
-    throw new AppError("Enter one valid recipient email before continuing.");
-  if (/[\r\n]/.test(draft.subject) || !draft.subject.trim())
-    throw new AppError("Enter a valid one-line subject.");
-  if (/\[(?:your|company|job|name|insert|recruiter|portfolio)[^\]]*\]/i.test(draft.body))
-    throw new AppError("Replace the remaining placeholders before continuing.");
-  if (
-    !draft.resumeId &&
-    /(?:i(?:'ve| have) attached|attached (?:my |the )?(?:résumé|resume|cv))/i.test(draft.body)
-  )
-    throw new AppError(
-      "Your email mentions an attachment. Attach your résumé or edit that sentence.",
-    );
-  if (!draft.body.trim()) throw new AppError("The email body is empty.");
+  const issue = contentChecks(draft).find((check) => check.status === "error");
+  if (issue) throw new AppError(issue.message);
 }
 function checkCurrent(draft: Draft) {
+  const company = get<Company>("company", draft.companyId);
+  if (
+    !company?.contactConfirmed ||
+    !company.contactSource.trim() ||
+    draft.to.toLowerCase() !== company.email.toLowerCase()
+  )
+    throw new AppError(
+      "Confirm this recruitment address and its source in Companies before approving or sending.",
+      409,
+    );
   if (!profile().confirmed)
     throw new AppError("Confirm your profile before approving or sending an application.", 409);
   const job = get<Job>("job", draft.jobId);

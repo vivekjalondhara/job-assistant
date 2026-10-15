@@ -28,6 +28,7 @@ import type { AppState, Company, Job, Draft } from "@/lib/types";
 import { Badge, Button, Empty, External, Modal, relative, label, allowNavigation } from "./ui";
 import { ProfilePanel, SettingsPanel, CompanyForm, JobForm } from "./workspace-forms";
 import { EmailPanel } from "./email-panel";
+import { JobGuidance } from "./job-guidance";
 
 export type Act = (
   name: string,
@@ -157,8 +158,8 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
       view: "companies" as View,
     },
     {
-      title: "Connect your writing tools",
-      text: "Configure OpenRouter and connect Gmail.",
+      title: "Connect optional tools",
+      text: "Use AI for rewriting and Gmail for approved sending. Local drafts work without them.",
       done: data.connections.openrouter && data.connections.gmail,
       view: "settings" as View,
     },
@@ -441,13 +442,10 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                   ) : (
                     <Empty
                       title="Your next opportunity belongs here"
-                      description="Add your target companies, or bring in your existing research to start exploring."
+                      description="Add your target companies or upload a company CSV to start exploring."
                     >
-                      <Button
-                        onClick={() => act("research.import")}
-                        busy={busy === "research.import"}
-                      >
-                        Import my existing research <ArrowRight size={15} />
+                      <Button onClick={() => navigate("companies")}>
+                        Explore companies <ArrowRight size={15} />
                       </Button>
                     </Empty>
                   )}
@@ -608,13 +606,10 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                 <div className="panel">
                   <Empty
                     title="Where would you love to work?"
-                    description="Add your first company or import the research already in your JOB folder."
+                    description="Add your first company or use Import CSV to upload your company list."
                   >
-                    <Button
-                      onClick={() => act("research.import")}
-                      busy={busy === "research.import"}
-                    >
-                      Import my existing research
+                    <Button onClick={() => setCompanyEditor("new")}>
+                      <Plus size={16} /> Add company
                     </Button>
                   </Empty>
                 </div>
@@ -971,6 +966,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                 </p>
               )}
             </div>
+            <JobGuidance job={detail} profile={data.profile} />
             <h3>About the opportunity</h3>
             <div className="job-description">{detail.description}</div>
             <div className="detail-footer">
