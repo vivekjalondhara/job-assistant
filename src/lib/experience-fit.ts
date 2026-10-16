@@ -94,7 +94,9 @@ export function experienceFit(description: string, profile: Profile) {
   const distinct = [...new Set(candidate.years)];
   // Multiple durations may describe different skills or overlapping jobs.
   // Ask for review rather than choosing the largest and inflating experience.
-  const candidateYears = !candidate.ambiguous && distinct.length === 1 ? distinct[0] : null;
+  const candidateYears =
+    profile.preferences?.experienceYears ??
+    (!candidate.ambiguous && distinct.length === 1 ? distinct[0] : null);
   const requiredYears =
     !requirement.ambiguous && requirement.years.length ? Math.max(...requirement.years) : null;
   const reasons: string[] = [];
@@ -125,5 +127,5 @@ export function experienceFit(description: string, profile: Profile) {
       `Your stated ${candidateYears} years of experience meets the listing's ${requiredYears}-year minimum duration. Check that it covers the required kind of work.`,
     );
   }
-  return { requiredYears, points, scoreLimit, reasons, gaps, unknowns };
+  return { requiredYears, candidateYears, points, scoreLimit, reasons, gaps, unknowns };
 }

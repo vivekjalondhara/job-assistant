@@ -1,4 +1,4 @@
-import { test, beforeEach, after } from "node:test";
+import { test, beforeEach, after } from "./scoped-test";
 import assert from "node:assert/strict";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { setupTestStorage } from "./setup";
@@ -210,4 +210,20 @@ test("disconnect remembers legacy draft ownership and does not remove a newly co
   assert.equal(legacy?.gmailAccountEmail, "first@example.com");
   assert.equal(legacy?.approvedHash, null);
   assert.equal(legacy?.status, "gmail_draft");
+});
+
+test("an invited user connects their own verified mailbox without changing the original owner connection", async () => {
+  const owner = await connection();
+  const secondaryId = store.id();
+  await store.query(
+    "INSERT INTO folio_accounts(id,email,name,role,status,created_at) VALUES($1,'candidate@example.com','Candidate','user','active',$2)",
+    [secondaryId, store.now()],
+  );
+  await oauthMock("candidate@gmail.com");
+  await store.withUser(secondaryId, async () => {
+    assert.equal(googleConfigured(), true);
+    await exchangeCode("test-code");
+    assert.equal((await connection())?.email, "candidate@gmail.com");
+  });
+  assert.deepEqual(await connection(), owner);
 });

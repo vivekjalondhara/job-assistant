@@ -1,4 +1,4 @@
-import { test, beforeEach, after } from "node:test";
+import { test, beforeEach, after } from "./scoped-test";
 import assert from "node:assert/strict";
 import { setupTestStorage } from "./setup";
 import { zipSync, strToU8 } from "fflate";
@@ -518,8 +518,9 @@ test("TXT and DOCX uploads extract text, keep original attachments, and require 
       "<w:document><w:body><w:p><w:r><w:t>Test Candidate built a Node.js API with PostgreSQL.</w:t></w:r></w:p></w:body></w:document>",
     ),
   });
-  await uploadResume(new File([new Uint8Array(archive)], "resume.docx"));
-  assert.match((await store.profile()).resumeText, /Node.js API/);
+  const docx = await uploadResume(new File([new Uint8Array(archive)], "resume.docx"));
+  assert.match((await store.get<{ text: string }>("file", docx.id))!.text, /Node.js API/);
+  assert.equal((await store.profile()).resumeId, file.id);
 });
 test("matching measures job skill coverage without penalizing unrelated candidate skills", async () => {
   const { p, job } = await fixtures();
@@ -781,7 +782,10 @@ test("invalid AI evidence and missing promised attachments leave the previous em
 });
 test("URL job titles are rejected before paid AI generation and leave existing drafts intact", async () => {
   const { draft, job } = await fixtures();
-  await store.put("job", { ...job, title: "https://job-assistant-nine.vercel.app/?view=companies" });
+  await store.put("job", {
+    ...job,
+    title: "https://job-assistant-nine.vercel.app/?view=companies",
+  });
   let requests = 0;
   global.fetch = async () => {
     requests++;
@@ -802,7 +806,7 @@ test("AI generation rejects stale versions and oversized instructions before mak
   };
   await assert.rejects(action("draft.generate", { id: draft.id, version: 0 }), /another tab/);
   await assert.rejects(
-    action("draft.generate", { id: draft.id, version: 1, style: "a".repeat(1001) }),
+    action("draft.generate", { id: draft.id, version: 1, style: "a".repeat(6001) }),
   );
   assert.equal(requests, 0);
 });
@@ -1005,4 +1009,153 @@ test("sent emails display their complete saved message and attachment as read-on
   assert.match(markup, /&lt;script&gt;/);
   assert.doesNotMatch(markup, /<script>|<textarea|Improve English|Send approved email/);
   assert.match(markup, /Filter emails/);
+});
+
+test("template, tone, instructions, and attachment choice persist through generation and edits", async () => {
+  const { draft, p } = await fixtures();
+  await store.put("profile", { ...p, resumeId: "selected-resume", resumeName: "resume.pdf" });
+  await store.put("file", { id: "selected-resume", name: "resume.pdf" });
+  const writingOptions = { template: "short", tone: "confident", minWords: 60, maxWords: 100 };
+  await action("draft.template", {
+    id: draft.id,
+    version: 1,
+    writingOptions,
+    style: "Focus on APIs.",
+    attachResume: true,
+  });
+  let saved = (await store.get<Draft>("draft", draft.id))!;
+  assert.deepEqual(saved.writingOptions, writingOptions);
+  assert.equal(saved.writingInstructions, "Focus on APIs.");
+  assert.equal(saved.resumeId, "selected-resume");
+  assert.match(saved.body, /attached my résumé/);
+  assert.equal(saved.status, "draft");
+  await action("draft.save", {
+    id: draft.id,
+    version: saved.version,
+    to: saved.to,
+    subject: saved.subject,
+    body: saved.body,
+    attachResume: true,
+    writingOptions: { ...writingOptions, tone: "friendly" },
+    writingInstructions: "Focus on my database work.",
+  });
+  saved = (await store.get<Draft>("draft", draft.id))!;
+  assert.equal(saved.writingOptions?.tone, "friendly");
+  assert.equal(saved.writingInstructions, "Focus on my database work.");
+  assert.equal(saved.approvedHash, null);
+});
+
+test("new applications receive recommended instructions and AI receives selected template controls", async () => {
+  const { draft, p } = await fixtures();
+  const { defaultWritingInstructions } = await import("../src/lib/email-writing");
+  await store.remove("draft", draft.id);
+  const created = await action("draft.create", { id: draft.jobId });
+  assert.ok("draftId" in created);
+  const fresh = (await store.get<Draft>("draft", created.draftId!))!;
+  assert.equal(fresh.writingInstructions, defaultWritingInstructions);
+  assert.equal(fresh.writingOptions?.template, "standard");
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async (_url, init) => {
+    const supplied = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
+    assert.equal(supplied.writingOptions.template, "achievement");
+    assert.equal(supplied.writingOptions.tone, "confident");
+    assert.equal(supplied.writingOptions.maxWords, 150);
+    assert.ok(
+      supplied.rankedEvidence.some(
+        (e: { quote: string; field: string }) =>
+          e.quote === p.experience && e.field === "experience",
+      ),
+    );
+    assert.equal(supplied.requestedStyle, defaultWritingInstructions);
+    return aiEmailResponse(p.experience);
+  };
+  await action("draft.generate", {
+    id: fresh.id,
+    version: fresh.version,
+    writingOptions: { template: "achievement", tone: "confident", minWords: 100, maxWords: 150 },
+  });
+  assert.equal(
+    (await store.get<Draft>("draft", fresh.id))?.writingOptions?.template,
+    "achievement",
+  );
+});
+
+test("follow-up generation requires an eligible sent application and rechecks replies after AI", async () => {
+  const { draft, p } = await fixtures();
+  const writingOptions = { template: "followup", tone: "professional", minWords: 50, maxWords: 90 };
+  await assert.rejects(
+    action("draft.template", { id: draft.id, version: 1, writingOptions }),
+    /sent application/,
+  );
+  await store.put("draft", { ...draft, status: "sent", sentAt: store.now() });
+  await assert.rejects(action("draft.followup", { id: draft.id }), /not due/);
+  const original = {
+    ...draft,
+    status: "sent" as const,
+    sentAt: new Date(Date.now() - 10 * 86400000).toISOString(),
+  };
+  await store.put("draft", original);
+  const created = await action("draft.followup", { id: draft.id });
+  assert.ok("draftId" in created);
+  const followup = (await store.get<Draft>("draft", created.draftId!))!;
+  assert.equal(followup.writingOptions?.template, "followup");
+  await action("draft.template", { id: followup.id, version: 1, writingOptions });
+  const saved = (await store.get<Draft>("draft", followup.id))!;
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async (_url, init) => {
+    const supplied = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
+    assert.equal(supplied.originalApplication.sentAt, original.sentAt);
+    assert.equal(supplied.originalApplication.subject, original.subject);
+    await store.put("draft", { ...original, replyStatus: "reply" });
+    return aiEmailResponse(p.experience);
+  };
+  await assert.rejects(
+    action("draft.generate", { id: saved.id, version: saved.version, writingOptions }),
+    /reply or bounce/,
+  );
+  assert.deepEqual(await store.get("draft", saved.id), saved);
+});
+
+test("AI generation rejects invented metrics and altered configured signatures", async () => {
+  const { draft, p } = await fixtures();
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async () =>
+    aiEmailResponse(p.experience, "I built a Node.js API and improved performance by 87%.");
+  await assert.rejects(
+    action("draft.generate", { id: draft.id, version: 1 }),
+    /numbers not supported/,
+  );
+  await store.put("profile", { ...p, signature: "Test Candidate\nSoftware Engineer" });
+  global.fetch = async () => aiEmailResponse(p.experience);
+  await assert.rejects(action("draft.generate", { id: draft.id, version: 1 }), /signature/);
+  assert.equal((await store.get<Draft>("draft", draft.id))?.body, draft.body);
+});
+
+test("English improver uses the selected tone while preserving metrics and the exact signature", async () => {
+  const { draft } = await fixtures();
+  const body =
+    "Hi Hiring Team, I improved performance by 60%.\n\nBest regards,\nTest Candidate\nSoftware Engineer";
+  await store.put("draft", { ...draft, body });
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_MODEL = "test/model";
+  global.fetch = async (_url, init) => {
+    const supplied = JSON.parse(JSON.parse(String(init?.body)).messages[1].content);
+    assert.equal(supplied.tone, "friendly");
+    assert.equal(supplied.resumeAttached, false);
+    assert.match(supplied.protectedSignature, /Software Engineer/);
+    return englishResponse(body.replace("Software Engineer", "Senior Software Engineer"));
+  };
+  await assert.rejects(
+    action("draft.polish", { id: draft.id, version: 1, tone: "friendly" }),
+    /signature/,
+  );
+  global.fetch = async () => englishResponse(body.replace("60%", "60"));
+  await assert.rejects(
+    action("draft.polish", { id: draft.id, version: 1 }),
+    /numbers or contact links/,
+  );
+  assert.equal((await store.get<Draft>("draft", draft.id))?.body, body);
 });

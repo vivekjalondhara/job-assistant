@@ -1,4 +1,4 @@
-import { test, beforeEach, after } from "node:test";
+import { test, beforeEach, after } from "./scoped-test";
 import assert from "node:assert/strict";
 import { setupTestStorage } from "./setup";
 const cleanup = await setupTestStorage();

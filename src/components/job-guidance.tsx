@@ -6,7 +6,7 @@ export function JobGuidance({ job, profile }: { job: Job; profile: Profile }) {
   const insights = jobInsights(job, profile);
   return (
     <section className="match-card job-guidance" aria-label="Job description guidance">
-      <h3>Tailor your application</h3>
+      <h3>Tailor your résumé and application</h3>
       <p className="small muted">
         A local keyword guide. Skill mentions may be required, preferred, or background context;
         check the full listing.
@@ -52,6 +52,10 @@ export function JobGuidance({ job, profile }: { job: Job; profile: Profile }) {
             </>
           )}
           <h4>How to improve this application</h4>
+          <p className="small muted">
+            Use the confirmed examples below to edit a role-specific résumé. Upload it as another
+            version in My profile, then select it for this application or email.
+          </p>
           <ul>
             {insights.suggestions.map((suggestion) => (
               <li key={suggestion}>{suggestion}</li>

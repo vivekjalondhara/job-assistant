@@ -1,3 +1,4 @@
+import { assertStorageAvailable } from "./account-limits";
 import { putObject, readObject, deleteObject, resumeKey } from "./storage";
 import path from "node:path";
 import { get, put, id, now, profile, all, transaction } from "./db";
@@ -9,8 +10,15 @@ export interface ResumeFile {
   mime: string;
   size: number;
   createdAt: string;
+  text?: string;
+  label?: string;
+  targetRole?: string;
+  version?: number;
+  previousId?: string;
 }
-export async function uploadResume(file: File) {
+export async function uploadResume(file: File, previousId?: string) {
+  const previous = previousId ? await get<ResumeFile>("file", previousId) : null;
+  if (previousId && !previous) throw new AppError("Previous résumé not found.", 404);
   if (file.size > 4 * 1024 * 1024) throw new AppError("Upload a résumé smaller than 4 MB.");
   const ext = path.extname(file.name).toLowerCase();
   if (![".pdf", ".docx", ".txt"].includes(ext))
@@ -79,6 +87,10 @@ export async function uploadResume(file: File) {
   await putObject(resumeKey(fileId), encrypt(buffer.toString("base64")));
   const meta: ResumeFile = {
     id: fileId,
+    version: (previous?.version || (previous ? 1 : 0)) + 1,
+    previousId: previous?.id,
+    label: previous?.label,
+    targetRole: previous?.targetRole,
     name,
     mime:
       ext === ".pdf"
@@ -88,19 +100,28 @@ export async function uploadResume(file: File) {
           : "text/plain",
     size: file.size,
     createdAt: now(),
+    text: text.slice(0, 60000),
   };
   try {
     await transaction(async () => {
+      if (previousId && !(await get("file", previousId)))
+        throw new AppError("Previous résumé was deleted. Upload this as a new résumé.", 409);
+      await assertStorageAvailable(file.size);
+      const firstUpload = (await all("file")).length === 0;
       await put("file", meta);
-      await put("profile", {
-        ...(await profile()),
-        resumeId: fileId,
-        resumeName: name,
-        resumeText: text.slice(0, 60000),
-        confirmed: false,
-        updatedAt: now(),
-      });
-      for (const job of await all<Job>("job")) await put("job", { ...job, match: null });
+      const currentProfile = await profile();
+      if (firstUpload && !currentProfile.resumeId) {
+        await put("profile", {
+          ...currentProfile,
+          resumeId: fileId,
+          defaultResumeId: currentProfile.defaultResumeId ?? fileId,
+          resumeName: name,
+          resumeText: text.slice(0, 60000),
+          confirmed: false,
+          updatedAt: now(),
+        });
+        for (const job of await all<Job>("job")) await put("job", { ...job, match: null });
+      }
     });
   } catch (error) {
     await deleteObject(resumeKey(fileId)).catch(() => {});
@@ -114,4 +135,14 @@ export async function readResume(fileId: string) {
   if (!meta) throw new AppError("Résumé not found. Upload it again.", 404);
   const encrypted = await readObject(resumeKey(fileId));
   return { meta, buffer: Buffer.from(decrypt<string>(encrypted), "base64") };
+}
+export async function selectedResume(
+  attach: boolean,
+  selectedId: string | undefined,
+  fallbackId: string,
+) {
+  const resumeId = attach ? (selectedId ?? fallbackId) : "";
+  const file = resumeId ? await get<ResumeFile>("file", resumeId) : null;
+  if (attach && !file) throw new AppError("Choose an uploaded résumé before continuing.");
+  return { resumeId, resumeName: file?.name || "" };
 }

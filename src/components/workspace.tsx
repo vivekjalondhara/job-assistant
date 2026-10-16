@@ -7,6 +7,7 @@ import {
   BriefcaseBusiness,
   Mail,
   UserRound,
+  FileText,
   Settings2,
   ArrowRight,
   Search,
@@ -24,7 +25,14 @@ import {
   CheckCheck,
   Clock3,
 } from "lucide-react";
-import type { AppState, Company, Job, Draft, EnglishSuggestion } from "@/lib/types";
+import type {
+  AppState,
+  Company,
+  Job,
+  Draft,
+  EnglishSuggestion,
+  JobImportPreview,
+} from "@/lib/types";
 import { Badge, Button, Empty, External, Modal, relative, label, allowNavigation } from "./ui";
 import { ProfilePanel, SettingsPanel, CompanyForm, JobForm } from "./workspace-forms";
 import { EmailPanel } from "./email-panel";
@@ -32,6 +40,13 @@ import { JobGuidance } from "./job-guidance";
 import { CsvImportPanel } from "./csv-import-panel";
 import { CompanyDirectory } from "./company-directory";
 import { readJsonResponse } from "@/lib/http-client";
+import { ResumesPanel } from "./career-profile";
+import { TodayPanel } from "./today-panel";
+import { JobImportPanel } from "./job-import-panel";
+import { JobSearchControls, emptySearch } from "./job-search-controls";
+import { ApplicationDetailsForm } from "./application-details";
+import { filterJobs, followUpDue } from "@/lib/career-tools";
+import { recommendationLabels, requirementsFor } from "@/lib/job-preferences";
 
 export type Act = (
   name: string,
@@ -39,17 +54,28 @@ export type Act = (
 ) => Promise<{
   message?: string;
   draftId?: string;
+  jobId?: string;
+  preview?: JobImportPreview;
   suggestion?: EnglishSuggestion;
   contacts?: { email: string; source: string; context: string }[];
 } | null>;
-type View = "overview" | "jobs" | "companies" | "emails" | "applications" | "profile" | "settings";
+type View =
+  | "overview"
+  | "jobs"
+  | "companies"
+  | "emails"
+  | "applications"
+  | "profile"
+  | "resumes"
+  | "settings";
 const navigation = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "overview", label: "Today", icon: LayoutDashboard },
   { id: "jobs", label: "Job matches", icon: BriefcaseBusiness },
   { id: "companies", label: "Companies", icon: Building2 },
   { id: "emails", label: "Email studio", icon: Mail },
   { id: "applications", label: "Applications", icon: CheckCheck },
   { id: "profile", label: "My profile", icon: UserRound },
+  { id: "resumes", label: "My résumés", icon: FileText },
 ] as const;
 export default function Workspace({ initialState }: { initialState: AppState }) {
   const [data, setData] = useState(initialState),
@@ -61,8 +87,10 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
     [jobEditor, setJobEditor] = useState(false),
     [jobDetail, setJobDetail] = useState<string | null>(null),
     [draftId, setDraftId] = useState<string | null>(null),
-    [query, setQuery] = useState(""),
+    [searchFilters, setSearchFilters] = useState(emptySearch),
+    [jobImport, setJobImport] = useState(false),
     [filter, setFilter] = useState("all");
+  const query = searchFilters.query;
   const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/state", { cache: "no-store" });
@@ -93,7 +121,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
     if (!allowNavigation()) return;
     setView(next);
     setSidebar(false);
-    setQuery("");
+    setSearchFilters(emptySearch);
     setFilter("all");
     window.history.replaceState(null, "", `/?view=${next}`);
   }
@@ -117,7 +145,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
       setBusy("");
     }
   };
-  async function upload(file: File, type: "resume") {
+  async function upload(file: File, type: "resume", previousId?: string) {
     if (busy) return;
     setBusy("upload");
     try {
@@ -125,6 +153,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
       const form = new FormData();
       form.set("file", file);
       form.set("type", type);
+      if (previousId) form.set("previousId", previousId);
       const r = await fetch("/api/upload", { method: "POST", body: form });
       const result = await readJsonResponse<{ message: string }>(r);
       await refresh();
@@ -169,16 +198,20 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
     },
   ];
   const detail = data.jobs.find((j) => j.id === jobDetail);
-  const searchedJobs = activeJobs
+  const searchedJobs = filterJobs(
+    data.jobs.filter((j) =>
+      filter === "skipped" ? j.status === "skipped" : !["closed", "skipped"].includes(j.status),
+    ),
+    searchFilters,
+    data.companies,
+  )
     .filter(
       (j) =>
-        `${j.title} ${companyById(j.companyId)?.name} ${j.location}`
-          .toLowerCase()
-          .includes(query.toLowerCase()) &&
-        (filter === "all" ||
-          (filter === "shortlisted" && j.status === "shortlisted") ||
-          (filter === "strong" && j.match?.rating === "strong") ||
-          (filter === "remote" && j.remote)),
+        filter === "all" ||
+        filter === "skipped" ||
+        (filter === "shortlisted" && j.status === "shortlisted") ||
+        (filter === "strong" && j.match?.recommendation === "good") ||
+        (filter === "remote" && j.remote),
     )
     .sort((a, b) => (b.match?.score || 0) - (a.match?.score || 0));
   const workerOnline =
@@ -210,14 +243,15 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
           {job.match ? (
             <Badge
               tone={
-                job.match.rating === "strong"
+                job.match.recommendation === "good"
                   ? "green"
-                  : job.match.rating === "possible"
+                  : job.match.recommendation === "stretch"
                     ? "amber"
                     : "neutral"
               }
             >
-              {job.match.score}% fit <span className="badge-dot" />
+              {recommendationLabels[job.match.recommendation || "review"]}{" "}
+              <span className="badge-dot" />
             </Badge>
           ) : (
             <Badge>Not scored</Badge>
@@ -250,6 +284,11 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
           <span className="tiny-dot" /> PERSONAL WORKSPACE
         </div>
         <nav aria-label="Main navigation">
+          {data.account?.role === "admin" && (
+            <a className="nav-item" href="/admin">
+              <ShieldCheck size={18} /> Admin panel
+            </a>
+          )}
           {navigation.map((n) => (
             <button
               key={n.id}
@@ -278,10 +317,12 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
             <Settings2 size={18} /> Settings
           </button>
           <div className="account">
-            <span className="account-avatar">{data.profile.name?.slice(0, 1) || "Y"}</span>
+            <span className="account-avatar">
+              {(data.profile.name || data.account?.name)?.slice(0, 1) || "Y"}
+            </span>
             <div>
-              <strong>{data.profile.name || "Your workspace"}</strong>
-              <span>Private account</span>
+              <strong>{data.profile.name || data.account?.name || "Your workspace"}</strong>
+              <span>{data.account?.email || "Private account"}</span>
             </div>
             <button
               className="icon-btn"
@@ -350,7 +391,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                   <RefreshCw size={16} /> Check for new jobs
                 </Button>
               </div>
-              {!steps.every((s) => s.done) && (
+              {!steps.slice(0, 2).every((s) => s.done) && (
                 <section className="welcome-panel">
                   <div className="welcome-intro">
                     <span className="eyebrow">LET’S GET YOU SETTLED</span>
@@ -430,61 +471,16 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                   </div>
                 ))}
               </div>
-              <div className="overview-columns">
-                <section className="panel">
-                  <div className="section-heading">
-                    <div>
-                      <h2>Opportunities worth a look</h2>
-                      <p>Your latest roles, ready for a closer read.</p>
-                    </div>
-                    <Button variant="ghost" onClick={() => navigate("jobs")}>
-                      View all <ArrowRight size={15} />
-                    </Button>
-                  </div>
-                  {activeJobs.length ? (
-                    activeJobs.slice(0, 4).map(jobRow)
-                  ) : (
-                    <Empty
-                      title="Your next opportunity belongs here"
-                      description="Add your target companies or upload a company CSV to start exploring."
-                    >
-                      <Button onClick={() => navigate("companies")}>
-                        Explore companies <ArrowRight size={15} />
-                      </Button>
-                    </Empty>
-                  )}
-                </section>
-                <section className="panel activity-panel">
-                  <div className="section-heading">
-                    <div>
-                      <h2>A little progress, every day</h2>
-                      <p>Your workspace activity.</p>
-                    </div>
-                  </div>
-                  {data.activity.length ? (
-                    <div className="activity-list">
-                      {data.activity.slice(0, 6).map((a) => (
-                        <div className="activity-item" key={a.id}>
-                          <span className={`activity-dot ${a.kind}`} />
-                          <div>
-                            <strong>{a.label}</strong>
-                            <p>{a.detail}</p>
-                            <time>{relative(a.createdAt)}</time>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="quiet-note">
-                      <Clock3 size={24} />
-                      <p>A fresh start.</p>
-                      <span>
-                        Your searches, drafts, and applications will appear here as you go.
-                      </span>
-                    </div>
-                  )}
-                </section>
-              </div>
+              <TodayPanel
+                data={data}
+                act={act}
+                busy={busy}
+                onJob={setJobDetail}
+                onEmail={(id) => {
+                  setDraftId(id);
+                  navigate("emails");
+                }}
+              />
             </>
           )}
           {view === "jobs" && (
@@ -495,9 +491,14 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                   <h1>Good work starts with a good match.</h1>
                   <p>Explore roles against your experience. Keep the ones that feel right.</p>
                 </div>
-                <Button onClick={() => setJobEditor(true)}>
-                  <Plus size={16} /> Add a job
-                </Button>
+                <div className="button-row">
+                  <Button variant="primary" onClick={() => setJobImport(true)}>
+                    Import job link or text
+                  </Button>
+                  <Button onClick={() => setJobEditor(true)}>
+                    <Plus size={16} /> Add manually
+                  </Button>
+                </div>
               </div>
               {!data.profile.confirmed && (
                 <div className="notice">
@@ -507,9 +508,16 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                   </button>
                 </div>
               )}
+              <JobSearchControls
+                data={data}
+                value={searchFilters}
+                onChange={setSearchFilters}
+                act={act}
+                busy={busy}
+              />
               <div className="toolbar">
                 <div className="tabs" aria-label="Filter jobs">
-                  {["all", "shortlisted", "strong", "remote"].map((f) => (
+                  {["all", "shortlisted", "strong", "remote", "skipped"].map((f) => (
                     <button
                       key={f}
                       className={filter === f ? "active" : ""}
@@ -518,20 +526,11 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                       {f === "all"
                         ? "All opportunities"
                         : f === "strong"
-                          ? "Strong matches"
+                          ? "Good matches"
                           : label(f)}
                     </button>
                   ))}
                 </div>
-                <label className="search-field">
-                  <Search size={17} />
-                  <input
-                    aria-label="Search jobs"
-                    placeholder="Search roles or companies"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </label>
               </div>
               <div className="panel">
                 {searchedJobs.length ? (
@@ -579,13 +578,21 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
               your verification.
             </p>
           </section>
+          {view === "resumes" && (
+            <ResumesPanel
+              data={data}
+              act={act}
+              busy={busy}
+              upload={(file, previousId) => upload(file, "resume", previousId)}
+            />
+          )}
           {view === "profile" && (
             <ProfilePanel
               key={data.profile.updatedAt}
               data={data}
               act={act}
               busy={busy}
-              upload={(file) => upload(file, "resume")}
+              upload={(file, previousId) => upload(file, "resume", previousId)}
             />
           )}
           {view === "settings" && <SettingsPanel data={data} act={act} busy={busy} />}
@@ -619,6 +626,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                 {data.jobs.filter(
                   (j) =>
                     j.applicationStatus !== "not_submitted" ||
+                    !!j.application ||
                     data.drafts.some((d) => d.jobId === j.id),
                 ).length ? (
                   <div className="table-scroll">
@@ -636,17 +644,14 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                           .filter(
                             (j) =>
                               j.applicationStatus !== "not_submitted" ||
+                              !!j.application ||
                               data.drafts.some((d) => d.jobId === j.id),
                           )
                           .map((j) => {
                             const draft = data.drafts.find(
                               (d) => d.jobId === j.id && !d.followUpOf,
                             );
-                            const followupDue =
-                              draft?.status === "sent" &&
-                              draft.replyStatus === "none" &&
-                              Date.now() - Date.parse(draft.sentAt!) >=
-                                data.settings.followUpDays * 86400000;
+                            const followupDue = followUpDue(data, j);
                             return (
                               <tr key={j.id}>
                                 <td>
@@ -709,7 +714,9 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                                       variant="ghost"
                                       disabled={!!busy}
                                       onClick={async () => {
-                                        const r = await act("draft.followup", { id: draft.id });
+                                        const r = await act("draft.followup", {
+                                          id: followupDue.id,
+                                        });
                                         if (r?.draftId) {
                                           setDraftId(r.draftId);
                                           navigate("emails");
@@ -719,7 +726,9 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
                                       Prepare follow-up
                                     </Button>
                                   ) : (
-                                    <External href={j.applyUrl}>Application page</External>
+                                    <Button variant="ghost" onClick={() => setJobDetail(j.id)}>
+                                      {j.application?.nextAction || "Notes & reminders"}
+                                    </Button>
                                   )}
                                 </td>
                               </tr>
@@ -784,6 +793,18 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
           />
         </Modal>
       )}
+      {jobImport && (
+        <Modal title="Import a job" onClose={() => setJobImport(false)}>
+          <JobImportPanel
+            act={act}
+            busy={busy}
+            onImported={(id) => {
+              setJobImport(false);
+              setJobDetail(id);
+            }}
+          />
+        </Modal>
+      )}
       {detail && (
         <Modal title="A closer look" onClose={() => setJobDetail(null)}>
           <div className="job-detail">
@@ -812,7 +833,7 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
               <div className="section-heading">
                 <h3>
                   {detail.match
-                    ? `${detail.match.score}% fit · ${label(detail.match.rating)} match`
+                    ? `${recommendationLabels[detail.match.recommendation || "review"]} · ${detail.match.skillScore ?? detail.match.score}% ${detail.match.skillScore !== undefined ? "recognized skill overlap" : "AI score"}`
                     : "Get to know your fit"}
                 </h3>
                 <Button
@@ -860,6 +881,15 @@ export default function Workspace({ initialState }: { initialState: AppState }) 
               )}
             </div>
             <JobGuidance job={detail} profile={data.profile} />
+            {!!requirementsFor(detail).evidence.length && (
+              <details className="application-details">
+                <summary>Source excerpts for requirements</summary>
+                {requirementsFor(detail).evidence.map((quote, index) => (
+                  <blockquote key={index}>{quote}</blockquote>
+                ))}
+              </details>
+            )}
+            <ApplicationDetailsForm job={detail} data={data} act={act} busy={busy} />
             <h3>About the opportunity</h3>
             <div className="job-description">{detail.description}</div>
             <div className="detail-footer">

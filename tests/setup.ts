@@ -8,6 +8,9 @@ import {
 } from "@aws-sdk/client-s3";
 export async function setupTestStorage() {
   // Deliberately never use DATABASE_URL or the application's production bucket.
+  // Account tests must never send invitations through inherited SMTP credentials.
+  process.env.ACCOUNT_SMTP_HOST = "";
+  process.env.ACCOUNT_MAIL_FROM = "";
   const url = new URL(
     process.env.TEST_DATABASE_URL || "postgres://folio:folio-test-only@127.0.0.1:55439/folio_test",
   );

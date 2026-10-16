@@ -30,6 +30,8 @@ const env = {
   GOOGLE_CLIENT_ID: "",
   GOOGLE_CLIENT_SECRET: "",
   GOOGLE_ALLOWED_EMAIL: "",
+  ACCOUNT_SMTP_HOST: "",
+  ACCOUNT_MAIL_FROM: "",
   OPENROUTER_API_KEY: "",
   OPENROUTER_MODEL: "",
   VERCEL: "",
@@ -91,6 +93,8 @@ try {
   const login = await post("/api/auth/login", {
     password: "smoke-test-password",
     setupToken: env.APP_SETUP_TOKEN,
+    email: "admin@example.com",
+    name: "Smoke Admin",
   });
   assert.equal(login.status, 200);
   cookie = login.headers.get("set-cookie")!.split(";")[0];
@@ -138,6 +142,17 @@ try {
   form.set("file", new File([resumeText], "resume.txt", { type: "text/plain" }));
   assert.equal((await request("/api/upload", { method: "POST", body: form })).status, 200);
   let data = await (await request("/api/state")).json();
+  assert.equal(
+    data.profile.resumeId,
+    pdfState.profile.resumeId,
+    "Additional uploads preserve the profile source",
+  );
+  const textResume = data.resumes.find((r: { name: string }) => r.name === "resume.txt");
+  assert.equal(
+    (await post("/api/action", { action: "resume.select", payload: { id: textResume.id } })).status,
+    200,
+  );
+  data = await (await request("/api/state")).json();
   assert.equal(await (await request(`/api/resume/${data.profile.resumeId}`)).text(), resumeText);
   assert.equal(
     (

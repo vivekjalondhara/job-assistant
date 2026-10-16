@@ -1,4 +1,5 @@
 import type { Company, Draft, Job, Profile } from "./types";
+import { candidateSignature, emailWordCount, writingOptionsFor } from "./email-writing";
 
 export interface EmailCheck {
   id: string;
@@ -17,7 +18,7 @@ export function contentChecks(
 ): EmailCheck[] {
   const words = draft.body.trim().split(/\s+/).filter(Boolean).length;
   const placeholder =
-    /\[(?:your|company|job|name|insert|recruiter|portfolio|hiring)[^\]]*\]|\{\{[^}]+\}\}|<(?:your|insert|recruiter|company|name)[^>]*>/i;
+    /\[(?:your|company|job|name|insert|recruiter|portfolio|hiring|exact|candidate|position|date|email|phone)[^\]]*\]|\{\{[^}]+\}\}|<(?:your|insert|recruiter|company|name|candidate)[^>]*>/i;
   const attachmentMention = /\battach(?:ed|ment)\b|\benclosed\b/i;
   return [
     {
@@ -51,7 +52,7 @@ export function contentChecks(
     {
       id: "length",
       status: words > 320 ? "warning" : "pass",
-      message: "Consider shortening this email to around 170–230 words, plus your signature.",
+      message: "Consider shortening this email so the main request is easy to find.",
     },
   ];
 }
@@ -71,8 +72,35 @@ export function applicationChecks(
         message: "Your profile or résumé changed. Review the attachment and save the email again.",
       },
     ];
+  const options = writingOptionsFor(draft, profile);
+  const words = emailWordCount(draft.body, candidateSignature(profile));
+  const text = `${draft.subject}\n${draft.body}`.toLowerCase();
+  const contacts =
+    profile.signature.match(/https?:\/\/[^\s<>]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
   return [
-    ...contentChecks(draft),
+    ...contentChecks(draft).filter((check) => check.id !== "length"),
+    {
+      id: "length",
+      status: words < options.minWords || words > options.maxWords ? "warning" : "pass",
+      message: `${words} words excluding your signature. Target ${options.minWords}–${options.maxWords}; follow any shorter employer limit and never add filler.`,
+    },
+    {
+      id: "company-title",
+      status:
+        job &&
+        company &&
+        text.includes(job.title.toLowerCase()) &&
+        text.includes(company.name.toLowerCase())
+          ? "pass"
+          : "warning",
+      message: "Check that the exact job title and company name are included and correct.",
+    },
+    {
+      id: "signature",
+      status: contacts.some((value) => draft.body.split(value).length > 2) ? "warning" : "pass",
+      message:
+        "Contact details from your signature appear more than once. Remove repeated links or addresses.",
+    },
     {
       id: "profile",
       status: profile.confirmed ? "pass" : "error",

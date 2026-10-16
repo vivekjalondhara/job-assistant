@@ -1,4 +1,4 @@
-import { id, now, putMany, query } from "./db";
+import { id, now, putMany, query, userId } from "./db";
 import { inferBoard } from "./jobs";
 import type { Company } from "./types";
 
@@ -50,9 +50,9 @@ export async function insertCompanyBatch(companies: Company[]) {
   const names = companies.map((c) => c.name);
   const result = await query<{ name: string }>(
     `SELECT DISTINCT lower(btrim(data->>'name')) AS name FROM folio_records
-     WHERE kind='company' AND lower(btrim(data->>'name')) IN
+     WHERE user_id=$2 AND kind='company' AND lower(btrim(data->>'name')) IN
        (SELECT lower(btrim(value)) FROM unnest($1::text[]) AS value)`,
-    [names],
+    [names, userId()],
   );
   // Normalize through Postgres as well, preserving its case-folding rules for Unicode names.
   const normalized = await query<{ name: string }>(

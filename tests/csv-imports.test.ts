@@ -1,4 +1,4 @@
-import { after, beforeEach, test } from "node:test";
+import { after, beforeEach, test } from "./scoped-test";
 import assert from "node:assert/strict";
 import { setupTestStorage } from "./setup";
 import { MAX_CSV_BYTES } from "../src/lib/csv-import-types";

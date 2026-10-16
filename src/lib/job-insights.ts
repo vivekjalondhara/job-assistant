@@ -85,18 +85,39 @@ export function jobInsights(job: Pick<Job, "title" | "description">, profile: Pr
     [g.name, ...g.aliases].some((a) => mentions(evidenceText, a)),
   );
   const missing = mentioned.filter((g) => !supported.includes(g));
-  const examples = [profile.experience, profile.projects]
-    .flatMap((s) => s.split(/\n+|(?<=[.!?])\s+(?=[A-Z])/))
-    .map((s) => s.replace(/^\s*[-•]\s*/, "").trim())
-    .filter((s) => s.length >= 20 && s.length <= 700);
-  const ranked = [...new Set(examples)]
-    .map((quote) => ({
-      quote,
-      matches: supported.filter((g) => g.aliases.some((a) => mentions(quote, a))).length,
+  const stopWords = new Set(
+    "with from that this have will your their team work role years experience building built using application applications software engineer engineering required skills development developer company join about into across through including".split(
+      " ",
+    ),
+  );
+  const terms = (value: string) => [
+    ...new Set(
+      (value.toLowerCase().match(/[a-z]{4,}/g) || []).filter((word) => !stopWords.has(word)),
+    ),
+  ];
+  const jobTerms = terms(text);
+  const rankedEvidence = (["experience", "projects"] as const)
+    .flatMap((field) =>
+      profile[field]
+        .split(/\n+|(?<!\bPvt\.)(?<!\bLtd\.)(?<!\bInc\.)(?<=[.!?])\s+(?=[A-Z])/)
+        .map((s) => ({ field, quote: s.replace(/^\s*[-•]\s*/, "").trim() })),
+    )
+    .filter(
+      (e, index, all) =>
+        e.quote.length >= 20 &&
+        e.quote.length <= 1200 &&
+        all.findIndex((other) => other.quote === e.quote) === index,
+    )
+    .map((e) => ({
+      ...e,
+      relevance:
+        supported.filter((g) => [g.name, ...g.aliases].some((a) => mentions(e.quote, a))).length *
+          4 +
+        terms(e.quote).filter((word) => jobTerms.includes(word)).length,
+      measurable: /\d/.test(e.quote),
     }))
-    .filter((e) => e.matches > 0)
-    .sort((a, b) => b.matches - a.matches)
-    .slice(0, 2);
+    .sort((a, b) => b.relevance - a.relevance || Number(b.measurable) - Number(a.measurable));
+  const ranked = rankedEvidence.filter((e) => e.relevance > 0).slice(0, 2);
   const requirements = [
     ...new Set(
       job.description
@@ -116,6 +137,7 @@ export function jobInsights(job: Pick<Job, "title" | "description">, profile: Pr
     supported: supported.map((g) => g.name),
     missing: missing.map((g) => g.name),
     evidence: ranked.map((e) => e.quote),
+    rankedEvidence,
     requirements,
     suggestions: [
       ...(supported.length

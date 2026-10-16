@@ -1,5 +1,6 @@
 import type { Job, Match, Profile } from "./types";
-import { jobInsights } from "./job-insights";
+import { jobInsights, mentions } from "./job-insights";
+import { preferenceChecks } from "./job-preferences";
 import { experienceFit } from "./experience-fit";
 const tokens = (s: string) =>
   s
@@ -23,13 +24,31 @@ function seniority(title: string): number | null {
   return null;
 }
 export function matchJob(
-  job: Pick<Job, "title" | "description" | "location" | "remote">,
+  job: Pick<Job, "title" | "description" | "location" | "remote"> &
+    Pick<Partial<Job>, "requirements">,
   p: Profile,
 ): Match | null {
   if (!p.confirmed || !p.skills.length) return null;
   const insights = jobInsights(job, p);
   const found = insights.supported;
-  const experience = experienceFit(job.description, p);
+  const optional = (skill: string) => {
+    const lines = job.description.split(/\n|(?<=[.!?])\s+/).filter((line) => mentions(line, skill));
+    return (
+      lines.length > 0 &&
+      lines.every((line) => /preferred|nice.to.have|optional|bonus|desirable/i.test(line))
+    );
+  };
+  const weight = (skill: string) => (optional(skill) ? 0.35 : 1);
+  const skillOverlap = insights.mentioned.length
+    ? found.reduce((sum, skill) => sum + weight(skill), 0) /
+      insights.mentioned.reduce((sum, skill) => sum + weight(skill), 0)
+    : 0;
+  const experience = experienceFit(
+    job.requirements?.experienceMin != null
+      ? `Requires ${job.requirements.experienceMin} years of experience.`
+      : job.description,
+    p,
+  );
   const titleWords = new Set(tokens(job.title));
   const roleMatch =
     !p.targetRoles.length ||
@@ -38,10 +57,11 @@ export function matchJob(
       return words.length > 0 && words.every((t) => titleWords.has(t));
     });
   const locationMatch =
+    job.remote ||
     !p.preferredLocations.length ||
     p.preferredLocations.some((l) => job.location.toLowerCase().includes(l.toLowerCase()));
   let score = Math.round(
-    (insights.mentioned.length ? found.length / insights.mentioned.length : 0) * 50 +
+    skillOverlap * 50 +
       (roleMatch ? 20 : 0) +
       (locationMatch ? 10 : 0) +
       (job.remote ? 5 : 0) +
@@ -91,13 +111,52 @@ export function matchJob(
     : ["No exact skill mentions found. Review the description for related experience."];
   if (roleMatch && p.targetRoles.length)
     reasons.push("The title overlaps with your preferred roles.");
+  const checks = preferenceChecks(job, p);
+  const hardGap = checks.some(
+    (c) => c.status === "gap" && !["Experience", "Seniority"].includes(c.label),
+  );
+  const missingRequired = insights.missing.some(
+    (skill) =>
+      !optional(skill) &&
+      job.description
+        .split(/\n|(?<=[.!?])\s+/)
+        .some((line) => mentions(line, skill) && /\b(?:required|must|essential)\b/i.test(line)),
+  );
+  const stretch = checks.some((c) => c.status === "gap") || missingRequired;
+  const uncertain =
+    checks.some((c) => c.status === "unknown") ||
+    insights.missing.some((skill) => !optional(skill));
+  const sameRole =
+    roleMatch ||
+    p.targetRoles.some((role) =>
+      tokens(role)
+        .filter(
+          (word) =>
+            !["junior", "senior", "lead", "staff", "principal", "intern", "mid"].includes(word),
+        )
+        .every((word) => titleWords.has(word)),
+    );
+  const recommendation =
+    hardGap || !sameRole || !locationMatch
+      ? "poor"
+      : stretch || !roleMatch
+        ? "stretch"
+        : uncertain || score < 70
+          ? "review"
+          : "good";
+  if (hardGap) score = Math.min(score, 35);
+  else if (stretch) score = Math.min(score, 69);
   reasons.push(...experience.reasons);
   return {
     rating: score >= 70 ? "strong" : score >= 40 ? "possible" : "weak",
     score,
+    skillScore: Math.round(skillOverlap * 100),
+    recommendation,
+    checks,
     reasons,
-    gaps,
+    gaps: [...gaps, ...checks.filter((c) => c.status === "gap").map((c) => c.detail)],
     unknowns: [
+      ...checks.filter((c) => c.status === "unknown").map((c) => c.detail),
       ...unknowns,
       "Rules compare explicit text only; confirm relevant experience, mandatory skills, work authorization, and salary against the full listing.",
       ...(job.remote

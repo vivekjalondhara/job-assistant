@@ -1,4 +1,4 @@
-import { after, afterEach, beforeEach, test } from "node:test";
+import { after, afterEach, beforeEach, test } from "./scoped-test";
 import assert from "node:assert/strict";
 import { setupTestStorage } from "./setup";
 import type { Company, Job } from "../src/lib/types";

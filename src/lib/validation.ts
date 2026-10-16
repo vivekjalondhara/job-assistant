@@ -37,6 +37,17 @@ export const profileSchema = z.object({
   signature: text(1000),
   tone: z.enum(["warm", "concise", "formal"]),
   confirmed: z.boolean(),
+  preferences: z
+    .object({
+      experienceYears: z.number().min(0).max(60).nullable(),
+      seniority: z.enum(["", "intern", "junior", "mid", "senior", "lead"]),
+      workCountries: z.array(text(80).min(1)).max(30),
+      employmentType: z.enum(["", "full-time", "part-time", "contract", "internship", "temporary"]),
+      workplace: z.enum(["", "remote", "hybrid", "onsite"]),
+      salaryMin: z.number().min(0).max(1000000000).nullable(),
+      salaryCurrency: z.string().regex(/^[A-Z]{3}$/),
+    })
+    .optional(),
 });
 export const companySchema = z.object({
   name: text(200).min(1),
@@ -61,10 +72,22 @@ export const jobSchema = z.object({
 export const settingsSchema = z.object({
   automationPaused: z.boolean(),
   dailySearch: z.boolean(),
-  dailySendLimit: z.number().int().min(1).max(50),
-  monthlyAiBudget: z.number().min(0.1).max(1000),
+  dailySendLimit: z.number().int().min(0).max(500),
+  monthlyAiBudget: z.number().min(0).max(10000),
   followUpDays: z.number().int().min(3).max(30),
 });
+export const writingOptionsSchema = z
+  .object({
+    template: z.enum(["standard", "short", "achievement", "followup"]),
+    tone: z.enum(["professional", "concise", "friendly", "confident"]),
+    minWords: z.number().int().min(30).max(300),
+    maxWords: z.number().int().min(30).max(300),
+  })
+  .refine(
+    (value) => value.minWords <= value.maxWords,
+    "Minimum words must not exceed maximum words.",
+  );
+export const writingInstructionsSchema = text(6000);
 export const draftEditSchema = z.object({
   version: z.number().int(),
   to: z.union([z.literal(""), z.email()]),
@@ -73,6 +96,9 @@ export const draftEditSchema = z.object({
     .refine((v) => !/[\r\n]/.test(v)),
   body: text(16000).min(20),
   attachResume: z.boolean(),
+  resumeId: text(100).optional(),
+  writingOptions: writingOptionsSchema.optional(),
+  writingInstructions: writingInstructionsSchema.optional(),
 });
 export const directSendSchema = draftEditSchema.extend({
   to: z.email(),

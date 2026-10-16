@@ -1,5 +1,7 @@
 # Folio review and improvement plan
 
+> Historical review: this document describes an earlier SQLite version and findings at that time. The application now uses Neon/Postgres. See [CAREER_UPGRADES.md](CAREER_UPGRADES.md) for the implemented job search, matching, templates, résumé and tracking workflows; recheck remaining findings against current code before using this older plan.
+
 Reviewed on 15 October 2026. Scope: review and planning only; no application code changed.
 
 Folio already has the core parts of a personal job assistant. The next release should make synchronization trustworthy and job/email decisions more accurate before expanding automatic discovery. Keep the existing Next.js application, SQLite database, and worker for local use. A rewrite is not needed to address these gaps.

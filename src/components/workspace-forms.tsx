@@ -19,6 +19,7 @@ import type { Act } from "./workspace";
 import { Button, Badge, External } from "./ui";
 import type { CompanyPage } from "@/lib/companies";
 import { readJsonResponse } from "@/lib/http-client";
+import { CareerPreferences, ResumeLibrary } from "./career-profile";
 
 const value = (form: FormData, key: string) => String(form.get(key) || "").trim();
 const list = (s: string) =>
@@ -52,7 +53,7 @@ export function ProfilePanel({
   data: AppState;
   act: Act;
   busy: string;
-  upload: (file: File) => Promise<void>;
+  upload: (file: File, previousId?: string) => Promise<void>;
 }) {
   const p = data.profile;
   const [confirmed, setConfirmed] = useState(p.confirmed);
@@ -76,6 +77,16 @@ export function ProfilePanel({
       signature: value(f, "signature"),
       tone: value(f, "tone"),
       confirmed,
+      preferences: {
+        experienceYears:
+          value(f, "experienceYears") === "" ? null : Number(f.get("experienceYears")),
+        seniority: value(f, "seniority"),
+        workCountries: list(value(f, "workCountries")),
+        workplace: value(f, "workplace"),
+        employmentType: value(f, "employmentType"),
+        salaryMin: value(f, "salaryMin") === "" ? null : Number(f.get("salaryMin")),
+        salaryCurrency: value(f, "salaryCurrency"),
+      },
     });
   }
   return (
@@ -213,6 +224,7 @@ export function ProfilePanel({
               <input name="remoteOnly" type="checkbox" defaultChecked={p.remoteOnly} /> I’m only
               considering remote roles
             </label>
+            <CareerPreferences profile={p} />
             <div className="form-section-title">
               <h2>Sound like yourself</h2>
               <p>A natural voice for your application emails.</p>
@@ -272,7 +284,7 @@ export function ProfilePanel({
               {busy === "upload"
                 ? "Reading résumé…"
                 : p.resumeId
-                  ? "Replace résumé"
+                  ? "Upload another version"
                   : "Upload résumé"}
               <input
                 type="file"
@@ -298,6 +310,7 @@ export function ProfilePanel({
               fill them manually.
             </p>
           </section>
+          <ResumeLibrary data={data} act={act} busy={busy} upload={upload} />
           <div className="aside-note">
             <ShieldCheck size={20} />
             <strong>Facts first. Always.</strong>
@@ -657,8 +670,7 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
           </div>
           {!data.connections.openrouter && (
             <div className="notice small">
-              In your server’s .env, set <strong>OPENROUTER_API_KEY</strong> and{" "}
-              <strong>OPENROUTER_MODEL</strong>, then restart. Keep the key private.
+              Ask your administrator to enable AI features for this application.
             </div>
           )}
           <External href="https://openrouter.ai/settings/keys">OpenRouter API settings</External>
@@ -695,8 +707,8 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
             application threads.
           </p>
           <p className="small muted">
-            Connect one allowed account at a time. To switch, disconnect below, then choose another
-            allowed account when connecting. Your application history stays here.
+            Connect your Gmail account to this private workspace. To switch mailboxes, disconnect
+            first. Other users’ connections and application history stay separate.
           </p>
           <div className="integration-details">
             <p>
@@ -724,10 +736,7 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
             <>
               {!data.connections.googleConfigured && (
                 <div className="notice small">
-                  Set <strong>GOOGLE_CLIENT_ID</strong>, <strong>GOOGLE_CLIENT_SECRET</strong>, and{" "}
-                  <strong>GOOGLE_ALLOWED_EMAIL</strong> in your server environment. The allowed
-                  emails can be a single address or a comma-separated list. See the README for local
-                  and Vercel setup.
+                  Ask your administrator to enable Gmail connections for this application.
                 </div>
               )}
               {data.connections.googleConfigured ? (
@@ -774,19 +783,25 @@ export function SettingsPanel({ data, act, busy }: { data: AppState; act: Act; b
               <input
                 name="dailySendLimit"
                 type="number"
-                min={1}
-                max={50}
-                defaultValue={options.dailySendLimit}
+                min={0}
+                max={data.account?.limits.dailySendLimit ?? 500}
+                defaultValue={Math.min(
+                  options.dailySendLimit,
+                  data.account?.limits.dailySendLimit ?? 500,
+                )}
               />
             </Field>
             <Field label="Recorded AI spend limit (USD)">
               <input
                 name="monthlyAiBudget"
                 type="number"
-                min={0.1}
-                max={1000}
-                step={0.1}
-                defaultValue={options.monthlyAiBudget}
+                min={0}
+                max={data.account?.limits.monthlyAiBudget ?? 10000}
+                step={0.01}
+                defaultValue={Math.min(
+                  options.monthlyAiBudget,
+                  data.account?.limits.monthlyAiBudget ?? 10000,
+                )}
               />
             </Field>
             <Field label="Follow-up reminder after (days)">

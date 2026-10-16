@@ -20,6 +20,16 @@ import type { Act } from "./workspace";
 import { Badge, Button, Empty, External, label, relative, allowNavigation } from "./ui";
 import { applicationChecks, contentChecks, draftInputsChanged } from "@/lib/email-checks";
 import { EmailPreview } from "./email-preview";
+import { TemplateLibrary, TemplatePicker } from "./template-library";
+import {
+  candidateSignature,
+  defaultWritingInstructions,
+  emailTemplates,
+  emailTones,
+  emailWordCount,
+  writingOptionsFor,
+  type WritingOptions,
+} from "@/lib/email-writing";
 
 export function EmailPanel({
   data,
@@ -61,8 +71,9 @@ export function EmailPanel({
           <p>Write directly to an email address or prepare an application from a job.</p>
         </div>
         <div className="button-row">
+          <TemplateLibrary data={data} act={act} busy={busy} />
           <Badge tone="green">
-            <ShieldCheck size={13} /> Approval before sending
+            <ShieldCheck size={13} /> Review before sending
           </Badge>
           <Button
             variant="primary"
@@ -179,11 +190,19 @@ function Composer({
     [subject, setSubject] = useState(draft.subject),
     [body, setBody] = useState(draft.body),
     [attach, setAttach] = useState(!!draft.resumeId),
+    [resumeId, setResumeId] = useState(
+      draft.resumeId || (data.profile.defaultResumeId ?? data.profile.resumeId),
+    ),
     [reviewed, setReviewed] = useState(false),
-    [instructions, setInstructions] = useState(draft.writingInstructions || ""),
+    [instructions, setInstructions] = useState(
+      draft.writingInstructions ?? defaultWritingInstructions,
+    ),
+    [writingOptions, setWritingOptions] = useState<WritingOptions>(() =>
+      writingOptionsFor(draft, data.profile),
+    ),
     [exportNotice, setExportNotice] = useState(""),
     [showPreview, setShowPreview] = useState(false),
-    [suggestion, setSuggestion] = useState<EnglishSuggestion | null>(null);
+    [suggestion, setSuggestion] = useState<(EnglishSuggestion & { original: string }) | null>(null);
   const company = data.companies.find((c) => c.id === draft.companyId),
     job = data.jobs.find((j) => j.id === draft.jobId);
   const direct = draft.kind === "direct";
@@ -194,15 +213,39 @@ function Composer({
     (to !== draft.to ||
       subject !== draft.subject ||
       body !== draft.body ||
-      attach !== !!draft.resumeId);
-  const dirty = !locked && (inputsChanged || edited);
-  const words = body.trim() ? body.trim().split(/\s+/).length : 0;
+      attach !== !!draft.resumeId ||
+      (attach && resumeId !== draft.resumeId));
+  const preferencesChanged =
+    JSON.stringify(writingOptions) !== JSON.stringify(writingOptionsFor(draft, data.profile)) ||
+    (!direct && instructions !== (draft.writingInstructions ?? defaultWritingInstructions));
+  const dirty = !locked && (inputsChanged || edited || preferencesChanged);
+  const invalidOptions =
+    !Number.isInteger(writingOptions.minWords) ||
+    !Number.isInteger(writingOptions.maxWords) ||
+    writingOptions.minWords < 30 ||
+    writingOptions.maxWords > 300 ||
+    writingOptions.minWords > writingOptions.maxWords;
+  const words = emailWordCount(body, candidateSignature(data.profile));
+  const generationOptions = {
+    id: draft.id,
+    version: draft.version,
+    style: instructions,
+    writingOptions,
+    attachResume: attach,
+    resumeId,
+  };
+  const contentEdited = to !== draft.to || subject !== draft.subject || body !== draft.body;
   const preview = {
     ...draft,
+    writingOptions,
     to,
     subject,
     body,
-    resumeId: attach ? (dirty ? data.profile.resumeId : draft.resumeId) : "",
+    resumeId: attach ? resumeId : "",
+    resumeName:
+      (data.resumes || []).find((r) => r.id === resumeId)?.name ||
+      draft.resumeName ||
+      data.profile.resumeName,
     ...(direct ? { profileUpdatedAt: data.profile.updatedAt } : {}),
   };
   const checks = applicationChecks(preview, data.profile, job, company);
@@ -245,6 +288,9 @@ function Composer({
       subject,
       body,
       attachResume: attach,
+      resumeId,
+      writingOptions,
+      ...(!direct ? { writingInstructions: instructions } : {}),
     });
   useEffect(() => {
     function beforeUnload(e: BeforeUnloadEvent) {
@@ -264,6 +310,22 @@ function Composer({
   return (
     <div className="composer-area">
       <section className="composer panel">
+        {!locked && (
+          <TemplatePicker
+            data={data}
+            job={job}
+            company={company}
+            followup={!!draft.followUpOf}
+            busy={busy}
+            hasContent={!!body.trim()}
+            onApply={(nextSubject, nextBody) => {
+              setSubject(draft.followUpOf ? draft.subject : nextSubject);
+              setBody(nextBody);
+              setReviewed(false);
+              setSuggestion(null);
+            }}
+          />
+        )}
         <div className="composer-heading">
           <span>
             <Mail size={17} />{" "}
@@ -277,6 +339,121 @@ function Composer({
             {dirty ? "Unsaved changes" : label(draft.status)}
           </Badge>
         </div>
+        {!locked && (
+          <section className="writing-preferences" aria-label="Writing preferences">
+            <span className="eyebrow">
+              {direct ? "REFINE YOUR MESSAGE" : "CHOOSE YOUR APPROACH"}
+            </span>
+            <div className="writing-controls">
+              {!direct && (
+                <label>
+                  Email template
+                  <select
+                    value={writingOptions.template}
+                    disabled={!!busy}
+                    onChange={(event) => {
+                      const template = event.target.value as WritingOptions["template"];
+                      setWritingOptions({
+                        ...writingOptions,
+                        template,
+                        minWords: emailTemplates[template].minWords,
+                        maxWords: emailTemplates[template].maxWords,
+                      });
+                      setReviewed(false);
+                      setSuggestion(null);
+                    }}
+                  >
+                    {Object.entries(emailTemplates).map(([value, template]) => (
+                      <option
+                        key={value}
+                        value={value}
+                        disabled={(value === "followup") !== !!draft.followUpOf}
+                      >
+                        {template.label}
+                        {value === "standard" ? " · Recommended" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label>
+                Tone
+                <select
+                  value={writingOptions.tone}
+                  disabled={!!busy}
+                  onChange={(event) => {
+                    setWritingOptions({
+                      ...writingOptions,
+                      tone: event.target.value as WritingOptions["tone"],
+                    });
+                    setReviewed(false);
+                    setSuggestion(null);
+                  }}
+                >
+                  {emailTones.map((tone) => (
+                    <option key={tone} value={tone}>
+                      {tone[0].toUpperCase() + tone.slice(1)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {!direct && (
+              <>
+                <p className="small muted">{emailTemplates[writingOptions.template].description}</p>
+                <div className="word-targets">
+                  <label>
+                    Minimum words
+                    <input
+                      type="number"
+                      min={30}
+                      max={300}
+                      value={writingOptions.minWords || ""}
+                      disabled={!!busy}
+                      onChange={(event) => {
+                        setWritingOptions({
+                          ...writingOptions,
+                          minWords: Number(event.target.value),
+                        });
+                        setReviewed(false);
+                      }}
+                    />
+                  </label>
+                  <span aria-hidden="true">–</span>
+                  <label>
+                    Maximum words
+                    <input
+                      type="number"
+                      min={30}
+                      max={300}
+                      value={writingOptions.maxWords || ""}
+                      disabled={!!busy}
+                      onChange={(event) => {
+                        setWritingOptions({
+                          ...writingOptions,
+                          maxWords: Number(event.target.value),
+                        });
+                        setReviewed(false);
+                      }}
+                    />
+                  </label>
+                  <span className="small muted">excluding your signature</span>
+                </div>
+                {invalidOptions && (
+                  <p className="small" role="alert">
+                    Use a word range between 30 and 300, with the minimum no higher than the
+                    maximum.
+                  </p>
+                )}
+                {!draft.followUpOf && (
+                  <p className="small muted">
+                    Prepare a follow-up from a sent application once its reminder is due.
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+        )}
         {!locked && (
           <div className="email-view-switch" aria-label="Email view">
             <Button
@@ -296,9 +473,7 @@ function Composer({
             to={to}
             subject={subject}
             body={body}
-            resumeName={
-              preview.resumeId ? (dirty ? data.profile.resumeName : draft.resumeName) : undefined
-            }
+            resumeName={preview.resumeId ? preview.resumeName : undefined}
             sentAt={draft.status === "sent" ? draft.sentAt : null}
           />
         ) : (
@@ -355,7 +530,7 @@ function Composer({
                 <input
                   type="checkbox"
                   checked={attach}
-                  disabled={locked || !!busy || !data.profile.resumeId}
+                  disabled={locked || !!busy || !(data.resumes?.length || data.profile.resumeId)}
                   onChange={(e) => {
                     setAttach(e.target.checked);
                     setReviewed(false);
@@ -363,19 +538,50 @@ function Composer({
                   }}
                 />
                 <Paperclip size={15} />
-                <span>
-                  {(dirty
-                    ? data.profile.resumeName
-                    : draft.resumeName || data.profile.resumeName) ||
-                    "Upload a résumé in My profile"}
-                </span>
+                <span>{preview.resumeName || "Upload a résumé in My profile"}</span>
               </label>
-              <span className="small muted">{words} words</span>
+              <span className="small muted">{words} words · excluding signature</span>
             </div>
+            {attach && !locked && (
+              <label className="resume-select">
+                Résumé attachment
+                <select
+                  value={resumeId}
+                  disabled={!!busy}
+                  onChange={(e) => {
+                    setResumeId(e.target.value);
+                    setReviewed(false);
+                    setSuggestion(null);
+                  }}
+                >
+                  <option value="">Choose a résumé</option>
+                  {draft.resumeId && !data.resumes?.some((r) => r.id === draft.resumeId) && (
+                    <option value={draft.resumeId}>
+                      {draft.resumeName || "Previous résumé"} (file unavailable)
+                    </option>
+                  )}
+                  {(data.resumes || [{ id: data.profile.resumeId, name: data.profile.resumeName }])
+                    .filter((r) => r.id)
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {"label" in r && typeof r.label === "string" && r.label ? r.label : r.name}
+                      </option>
+                    ))}
+                </select>
+                {resumeId && (
+                  <a href={`/api/resume/${resumeId}`} target="_blank" rel="noopener noreferrer">
+                    Preview selected résumé
+                  </a>
+                )}
+              </label>
+            )}
           </>
         )}
         {!locked && (
           <div className="writing-tools">
+            {!!body.trim() && (
+              <TemplateLibrary data={data} act={act} busy={busy} subject={subject} body={body} />
+            )}
             {inputsChanged && (
               <p className="small notice amber">
                 {direct
@@ -387,21 +593,36 @@ function Composer({
               <Sparkles size={14} /> Writing assistant
             </span>
             {!direct && (
-              <label className="writing-brief">
-                <span>Writing instructions for AI drafts (optional)</span>
+              <div className="writing-brief">
+                <label htmlFor={`${draft.id}-writing-instructions`}>
+                  Writing instructions for AI drafts
+                </label>
                 <textarea
+                  id={`${draft.id}-writing-instructions`}
                   value={instructions}
                   onChange={(event) => setInstructions(event.target.value)}
-                  maxLength={1000}
-                  rows={3}
-                  disabled={!!busy || !!draft.followUpOf}
-                  placeholder="For example: Keep it under 120 words. Focus on my API project. Use a concise, friendly tone."
+                  maxLength={6000}
+                  rows={6}
+                  disabled={!!busy}
+                  placeholder="Add any role-specific emphasis. Your template and tone apply automatically."
                 />
-              </label>
+                <span className="small muted">
+                  {instructions.length}/6,000 characters · applies to generation; Improve English
+                  preserves your existing meaning.
+                </span>
+                <button
+                  type="button"
+                  className="text-link small"
+                  disabled={!!busy}
+                  onClick={() => setInstructions(defaultWritingInstructions)}
+                >
+                  Restore recommended instructions
+                </button>
+              </div>
             )}
             <p className="small muted">
               {direct
-                ? "Write your message and save it. Improve English can help with grammar and phrasing."
+                ? "Improve English can help with grammar and phrasing. Save a draft first to use it."
                 : "Draft generation uses your saved job and confirmed profile. Improve English edits the saved email. Review every factual claim before sending."}
             </p>
             <div className="button-row">
@@ -409,7 +630,8 @@ function Composer({
                 variant="ghost"
                 disabled={
                   !!busy ||
-                  dirty ||
+                  edited ||
+                  inputsChanged ||
                   !data.connections.openrouter ||
                   body.trim().length < 20 ||
                   body.length > 8000
@@ -419,8 +641,9 @@ function Composer({
                   const result = await act("draft.polish", {
                     id: draft.id,
                     version: draft.version,
+                    tone: writingOptions.tone,
                   });
-                  if (result?.suggestion) setSuggestion(result.suggestion);
+                  if (result?.suggestion) setSuggestion({ ...result.suggestion, original: body });
                 }}
               >
                 <Sparkles size={14} /> Improve English
@@ -431,9 +654,9 @@ function Composer({
                     variant="ghost"
                     disabled={
                       !!busy ||
-                      edited ||
+                      contentEdited ||
+                      invalidOptions ||
                       !data.profile.confirmed ||
-                      !!draft.followUpOf ||
                       job?.status === "closed"
                     }
                     busy={busy === "draft.template"}
@@ -444,7 +667,7 @@ function Composer({
                           "Replace this saved email with a new draft from your profile?",
                         )
                       )
-                        act("draft.template", { id: draft.id, version: draft.version });
+                        act("draft.template", generationOptions);
                     }}
                   >
                     Write from my profile
@@ -453,10 +676,10 @@ function Composer({
                     variant="ghost"
                     disabled={
                       !!busy ||
-                      edited ||
+                      contentEdited ||
+                      invalidOptions ||
                       !data.connections.openrouter ||
                       !data.profile.confirmed ||
-                      !!draft.followUpOf ||
                       job?.status === "closed"
                     }
                     busy={busy === "draft.generate"}
@@ -465,49 +688,11 @@ function Composer({
                         !body.trim() ||
                         window.confirm("Replace this saved email with an AI draft?")
                       )
-                        act("draft.generate", {
-                          id: draft.id,
-                          version: draft.version,
-                          style: instructions,
-                        });
+                        act("draft.generate", generationOptions);
                     }}
                   >
                     {body ? "Rewrite with AI" : "Generate with AI"}
                   </Button>
-                  {body && (
-                    <>
-                      <Button
-                        variant="ghost"
-                        disabled={
-                          !!busy || dirty || !data.connections.openrouter || !!draft.followUpOf
-                        }
-                        onClick={() =>
-                          act("draft.generate", {
-                            id: draft.id,
-                            version: draft.version,
-                            style: `${instructions.slice(0, 850)}\nMake it shorter, around 90 words.`,
-                          })
-                        }
-                      >
-                        Make shorter
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        disabled={
-                          !!busy || dirty || !data.connections.openrouter || !!draft.followUpOf
-                        }
-                        onClick={() =>
-                          act("draft.generate", {
-                            id: draft.id,
-                            version: draft.version,
-                            style: `${instructions.slice(0, 850)}\nMake the wording sound more natural and conversational, while staying professional.`,
-                          })
-                        }
-                      >
-                        More natural
-                      </Button>
-                    </>
-                  )}
                 </>
               )}
             </div>
@@ -523,11 +708,16 @@ function Composer({
             {suggestion && (
               <section className="english-suggestion" aria-label="English suggestion">
                 <h3>Review the improved English</h3>
-                <details>
-                  <summary>Compare with your current wording</summary>
-                  <div className="email-preview-body">{body}</div>
-                </details>
-                <div className="email-preview-body">{suggestion.body}</div>
+                <div className="english-comparison">
+                  <section aria-label="Original wording">
+                    <h4>Original</h4>
+                    <div className="email-preview-body">{suggestion.original}</div>
+                  </section>
+                  <section aria-label="Improved wording">
+                    <h4>Improved · {writingOptions.tone}</h4>
+                    <div className="email-preview-body">{suggestion.body}</div>
+                  </section>
+                </div>
                 {suggestion.changes.length > 0 && (
                   <ul>
                     {suggestion.changes.map((change, index) => (
@@ -560,7 +750,9 @@ function Composer({
             )}
             {edited && (
               <p className="small muted">
-                Save your edits before using the writing assistant or syncing to Gmail.
+                {direct
+                  ? "You can send your current message directly, or save a draft to continue writing later."
+                  : "Save your edits before using the writing assistant or syncing to Gmail."}
               </p>
             )}
             {!data.connections.openrouter && (
@@ -615,15 +807,14 @@ function Composer({
                     onChange={(e) => setReviewed(e.target.checked)}
                   />
                   <span>
-                    {direct
-                      ? "I reviewed the recipient email address, message, and any attachment."
-                      : "I checked that the job is open and reviewed the recipient, factual claims, and attachment."}
+                    I checked the company, job title, recipient, subject, factual claims, and
+                    attachment, and confirmed that the job is open.
                   </span>
                 </label>
               )}
               <div className="button-row">
                 <Button
-                  disabled={!!busy || !dirty || !body.trim()}
+                  disabled={!!busy || !dirty || !body.trim() || invalidOptions}
                   onClick={save}
                   busy={busy === "draft.save"}
                 >
@@ -757,7 +948,7 @@ function Composer({
               <p className="small">
                 {direct
                   ? "Content checks passed. Review the recipient, message, and any attachment before sending."
-                  : "Automated checks passed. Read every claim and confirm the job is still open."}
+                  : "Check the company, exact job title, subject, and every factual claim. Confirm that the job is still open."}
               </p>
             )}
             {!data.connections.gmail && (

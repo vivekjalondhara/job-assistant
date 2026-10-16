@@ -1,3 +1,5 @@
+import type { ResumeFile } from "./files";
+import { effectiveLimits } from "./account-limits";
 import { z } from "zod";
 import { all, put, id, now, profile, settings, get, remove, transaction } from "./db";
 import { AppError, appUrl, privateHash } from "./security";
@@ -12,6 +14,14 @@ import {
 } from "./prompts";
 import { jobInsights } from "./job-insights";
 import { contentChecks } from "./email-checks";
+import {
+  candidateSignature,
+  defaultWritingInstructions,
+  defaultWritingOptions,
+  emailTemplates,
+  type EmailTone,
+  type WritingOptions,
+} from "./email-writing";
 export async function exclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const owner = id();
   await transaction(async () => {
@@ -57,7 +67,7 @@ export async function generate<T>(
   const used = (await all<Usage>("usage"))
     .filter((u) => u.createdAt.startsWith(month))
     .reduce((n, u) => n + (u.cost || 0), 0);
-  if (used >= (await settings()).monthlyAiBudget)
+  if (used >= (await effectiveLimits()).monthlyAiBudget)
     throw new AppError(
       "Your recorded monthly AI spending limit has been reached. Adjust it in Settings to continue.",
       429,
@@ -166,6 +176,9 @@ export async function writeEmail(
   style?: string,
   previous?: string,
   resumeAttached?: boolean,
+  options?: WritingOptions,
+  originalApplication?: Pick<Draft, "subject" | "sentAt">,
+  selectedResumeId?: string,
 ) {
   const p = await profile();
   if (!p.confirmed || !p.name || !p.experience)
@@ -174,18 +187,35 @@ export async function writeEmail(
     );
   if (job.status === "closed") throw new AppError("This vacancy is closed. Choose an open role.");
   const title = jobTitleSchema.parse(job.title);
-  const sourceText = [p.experience, p.projects, p.education, p.skills.join(", ")].join("\n");
+  const selected = selectedResumeId ? await get<ResumeFile>("file", selectedResumeId) : null;
+  if (selectedResumeId && !selected)
+    throw new AppError("Selected résumé is no longer available.", 409);
+  const sourceText = [
+    p.experience,
+    p.projects,
+    p.education,
+    p.skills.join(", "),
+    selected?.text || "",
+  ].join("\n");
+  const insights = jobInsights(job, p);
+  const writingOptions = options || defaultWritingOptions(p);
+  if (writingOptions.template === "followup" && !originalApplication?.sentAt)
+    throw new AppError("Follow-ups require an actual sent application.");
   const result = await generate("application_email", emailOutputSchema, applicationEmailPrompt, {
     candidate: {
       name: p.name,
+      email: p.email,
       headline: p.headline,
       location: p.location,
       availability: p.availability,
       portfolio: p.portfolio,
-      signature: p.signature,
-      tone: p.tone,
+      signature: candidateSignature(p),
+      tone: writingOptions.tone,
     },
     candidateEvidence: sourceText,
+    selectedResume: selected
+      ? { id: selected.id, label: selected.label || selected.name, text: selected.text || "" }
+      : null,
     company: { name: company.name },
     job: {
       title,
@@ -193,19 +223,56 @@ export async function writeEmail(
       location: job.location,
     },
     resumeAttached: resumeAttached ?? !!p.resumeId,
-    jobInsights: jobInsights(job, p),
-    requestedStyle: style || "Natural professional English",
+    jobInsights: insights,
+    rankedEvidence: insights.rankedEvidence,
+    writingOptions: {
+      ...writingOptions,
+      focus: emailTemplates[writingOptions.template].description,
+    },
+    originalApplication: originalApplication
+      ? { subject: originalApplication.subject, sentAt: originalApplication.sentAt }
+      : null,
+    requestedStyle: style || defaultWritingInstructions,
     previousDraft: previous?.slice(0, 8000) || null,
   });
   const normalized = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const metrics = (text: string): string[] => text.match(/\d+(?:[.,]\d+)*(?:[%+]|x\b)?/gi) || [];
   if (
-    !result.value.evidence.length ||
+    (!result.value.evidence.length && writingOptions.template !== "followup") ||
     result.value.evidence.some(
-      (e) => !e.sourceQuote.trim() || !normalized(sourceText).includes(normalized(e.sourceQuote)),
+      (e) =>
+        !e.sourceQuote.trim() ||
+        !normalized(sourceText).includes(normalized(e.sourceQuote)) ||
+        metrics(e.claim).some((metric) => !metrics(e.sourceQuote).includes(metric)),
     )
   )
     throw new AppError(
       "The generated email did not provide valid evidence for its claims. Please regenerate or write the email manually.",
+      422,
+    );
+  const verifiedNumbers = metrics(
+    [
+      sourceText,
+      p.name,
+      p.availability,
+      p.portfolio,
+      candidateSignature(p),
+      title,
+      company.name,
+      originalApplication?.subject,
+      originalApplication?.sentAt,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+  if (metrics(result.value.body).some((metric) => !verifiedNumbers.includes(metric)))
+    throw new AppError(
+      "The generated email contains numbers not supported by your saved evidence. Please regenerate or edit manually.",
+      422,
+    );
+  if (p.signature.trim() && !result.value.body.trimEnd().endsWith(p.signature.trim()))
+    throw new AppError(
+      "The generated email did not preserve your configured signature. Please regenerate.",
       422,
     );
   const issue = contentChecks({
@@ -220,8 +287,17 @@ export async function writeEmail(
     );
   return result;
 }
-export async function polishEmail(draft: Draft) {
+export async function polishEmail(draft: Draft, tone: EmailTone = "professional") {
   const body = z.string().trim().min(20).max(8000).parse(draft.body);
+  const p = await profile();
+  const signature = candidateSignature(p);
+  // Protect both configured signatures and manually written conventional sign-offs.
+  const signoff = body
+    .match(
+      /(?:^|\n)(?:best regards|kind regards|regards|best|sincerely|thanks|thank you)[,!]?\s*\n[\s\S]*$/i,
+    )?.[0]
+    .trim();
+  const protectedSignature = signoff || (signature && body.endsWith(signature) ? signature : "");
   const result = await generate(
     "email_english",
     z.object({
@@ -232,6 +308,9 @@ export async function polishEmail(draft: Draft) {
     {
       subject: draft.subject,
       body,
+      tone,
+      resumeAttached: !!draft.resumeId,
+      protectedSignature,
       purpose: draft.followUpOf
         ? "follow-up"
         : draft.kind === "direct"
@@ -243,8 +322,9 @@ export async function polishEmail(draft: Draft) {
   // This is a narrow guard; the comparison UI still requires a factual review.
   const protectedValues = (text: string) =>
     (
-      text.match(/https?:\/\/[^\s<>]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|\d+(?:[.,]\d+)*/gi) ||
-      []
+      text.match(
+        /https?:\/\/[^\s<>]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|\d+(?:[.,]\d+)*(?:[%+]|x\b)?/gi,
+      ) || []
     )
       .map((value) => value.replace(/[.,;!?]+$/, ""))
       .sort();
@@ -253,6 +333,8 @@ export async function polishEmail(draft: Draft) {
       "The suggestion changed numbers or contact links. Your original email was kept. Try again or edit it yourself.",
       422,
     );
+  if (protectedSignature && !result.value.body.endsWith(protectedSignature))
+    throw new AppError("The suggestion changed your signature. Your original email was kept.", 422);
   const issue = contentChecks({ ...draft, to: "review@example.com", body: result.value.body }).find(
     (check) => check.status === "error",
   );
@@ -262,6 +344,10 @@ export async function polishEmail(draft: Draft) {
 
 export async function analyzeJob(job: Job) {
   const p = await profile();
+  const resumeId = job.application?.resumeId || (p.defaultResumeId ?? p.resumeId);
+  const selected = resumeId ? await get<ResumeFile>("file", resumeId) : null;
+  if (resumeId && !selected)
+    throw new AppError("Select an available résumé for this application first.", 409);
   if (!p.confirmed) throw new AppError("Confirm your profile first.");
   const schema = z.object({
     rating: z.enum(["strong", "possible", "weak"]),
@@ -279,14 +365,17 @@ export async function analyzeJob(job: Job) {
       targetRoles: p.targetRoles,
       preferredLocations: p.preferredLocations,
       remoteOnly: p.remoteOnly,
+      preferences: p.preferences,
+      selectedResume: selected ? { id: selected.id, text: selected.text || "" } : null,
     },
     job: {
       title: job.title,
       location: job.location,
       description: job.description.slice(0, 25000),
+      requirements: job.requirements,
     },
   });
   if ((await profile()).updatedAt !== p.updatedAt)
     throw new AppError("Your profile changed during analysis. Please run the match again.", 409);
-  return { ...result.value, method: "ai" as const, profileUpdatedAt: p.updatedAt };
+  return { ...result.value, method: "ai" as const, profileUpdatedAt: p.updatedAt, resumeId };
 }

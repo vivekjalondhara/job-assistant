@@ -1,8 +1,10 @@
+import { currentUserId, LEGACY_USER_ID } from "./db";
+import { effectiveLimits, assertAccountAvailable } from "./account-limits";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import MailComposer from "nodemailer/lib/mail-composer";
 import { all, get, put, remove, now, settings, transaction, profile, activity } from "./db";
 import { AppError, appUrl, encrypt, decrypt, digest } from "./security";
-import { readResume } from "./files";
+import { readResume, selectedResume } from "./files";
 import { exclusive } from "./ai";
 import { scanCompany } from "./jobs";
 import type { Draft, Job, Company } from "./types";
@@ -31,7 +33,7 @@ export function googleConfigured() {
   return !!(
     process.env.GOOGLE_CLIENT_ID &&
     process.env.GOOGLE_CLIENT_SECRET &&
-    allowedGoogleEmails().length
+    (currentUserId() !== LEGACY_USER_ID || allowedGoogleEmails().length)
   );
 }
 export function authorizationUrl(state: string) {
@@ -163,6 +165,7 @@ async function bindLegacyDrafts(email: string) {
   }
 }
 async function gmail(expectedEmail: string, path: string, method = "GET", body?: unknown) {
+  await assertAccountAvailable();
   const token = await accessToken(expectedEmail);
   const current = await connection();
   if (
@@ -447,7 +450,7 @@ async function sendDraftLocked(draftId: string) {
         (d.sentAt && Date.parse(d.sentAt) > Date.now() - 86400000) ||
         ["sending", "uncertain"].includes(d.status),
     );
-    if (recent.length >= (await settings()).dailySendLimit)
+    if (recent.length >= (await effectiveLimits()).dailySendLimit)
       throw new AppError("Your rolling 24-hour sending allowance has been reached.", 429);
     if (
       (draft.kind === "direct" ? recent : drafts).some(
@@ -518,24 +521,19 @@ export async function sendDirectEmail(draftId: string, input: unknown) {
         409,
       );
     const user = await profile();
-    if (
-      parsed.attachResume &&
-      (!user.resumeId ||
-        parsed.resumeId !== user.resumeId ||
-        parsed.profileUpdatedAt !== user.updatedAt)
-    )
+    if (parsed.attachResume && (!parsed.resumeId || parsed.profileUpdatedAt !== user.updatedAt))
       throw new AppError(
         "Your résumé or profile changed. Review the attachment before sending.",
         409,
       );
     // The Send email click approves this exact editor snapshot, including its attachment.
+    const attachment = await selectedResume(parsed.attachResume, parsed.resumeId, user.resumeId);
     const next: Draft = {
       ...draft,
       to: parsed.to,
       subject: parsed.subject,
       body: parsed.body,
-      resumeId: parsed.attachResume ? user.resumeId : "",
-      resumeName: parsed.attachResume ? user.resumeName : "",
+      ...attachment,
       evidence: [],
       reviewNotes: [],
       model: "Manual",
@@ -580,7 +578,13 @@ export async function syncReplies(deadline = Date.now() + 200000) {
       (m: Record<string, any>) =>
         m.id !== draft.sentMessageId &&
         Number(m.internalDate) > Date.parse(draft.sentAt || "0") &&
-        !(m.labelIds || []).includes("SENT"),
+        !(m.labelIds || []).some((label: string) => ["SENT", "DRAFT"].includes(label)) &&
+        !(m.payload?.headers || []).some(
+          (header: { name: string; value: string }) =>
+            header.name.toLowerCase() === "from" &&
+            (header.value.match(/<([^>]+)>/)?.[1] || header.value).trim().toLowerCase() ===
+              conn.email.toLowerCase(),
+        ),
     );
     if (!messages.length) continue;
     const last = messages.at(-1);

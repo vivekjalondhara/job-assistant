@@ -38,8 +38,10 @@ const eventually = async (check, message, timeout = 120000) => {
 };
 try {
   await page.goto(origin + "/login");
+  await page.getByLabel("Email", { exact: true }).fill("admin@example.com");
   await page.getByLabel("Your password", { exact: true }).fill("smoke-test-password");
-  await page.getByRole("button", { name: "Open my workspace", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("link", { name: "My workspace", exact: true }).click();
   await page.getByRole("button", { name: "Companies", exact: true }).waitFor();
   await page.getByRole("button", { name: "Companies", exact: true }).click();
   await page.getByRole("heading", { name: "Your company shortlist." }).waitFor();

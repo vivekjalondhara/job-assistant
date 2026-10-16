@@ -1,4 +1,5 @@
-import { requireAuth, AppError } from "@/lib/security";
+import { withAuth } from "@/lib/security";
+import { AppError } from "@/lib/security";
 import { readResume } from "@/lib/files";
 export async function GET(
   _req: Request,
@@ -9,15 +10,16 @@ export async function GET(
   },
 ) {
   try {
-    await requireAuth();
-    const { id } = await context.params;
-    const file = await readResume(id);
-    return new Response(new Uint8Array(file.buffer), {
-      headers: {
-        "Content-Type": file.meta.mime,
-        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.meta.name)}`,
-        "Cache-Control": "no-store",
-      },
+    return await withAuth(async () => {
+      const { id } = await context.params;
+      const file = await readResume(id);
+      return new Response(new Uint8Array(file.buffer), {
+        headers: {
+          "Content-Type": file.meta.mime,
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.meta.name)}`,
+          "Cache-Control": "no-store",
+        },
+      });
     });
   } catch (e) {
     return Response.json(

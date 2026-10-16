@@ -4,12 +4,13 @@ import {
   randomBytes,
   createHash,
   createHmac,
-  scryptSync,
   timingSafeEqual,
 } from "node:crypto";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
-import { get, put, now, transaction } from "./db";
+import { query, transaction, withUser, LEGACY_USER_ID } from "./db";
+import { authenticate, createFirstAdmin, getAccount, hasAccounts } from "./accounts";
+import type { Account } from "./account-types";
 export class AppError extends Error {
   constructor(
     message: string,
@@ -59,35 +60,51 @@ export function appUrl() {
   }
   return new URL(configured || "http://localhost:3210").origin;
 }
-export async function isAuthenticated() {
-  const token = (await cookies()).get("folio_session")?.value;
-  if (!token) return false;
-  try {
-    const { payload } = await jwtVerify(token, secret(), {
-      issuer: "folio",
-      audience: "private-app",
-    });
-    return payload.sub === "owner";
-  } catch {
-    return false;
-  }
-}
-export async function requireAuth() {
-  if (!(await isAuthenticated())) throw new AppError("Please sign in again.", 401);
-}
-export async function setSession() {
-  const token = await new SignJWT({})
+export async function createSessionToken(user: Account) {
+  return new SignJWT({ version: user.session_version })
     .setProtectedHeader({ alg: "HS256" })
-    .setSubject("owner")
+    .setSubject(user.id)
     .setIssuer("folio")
     .setAudience("private-app")
     .setIssuedAt()
     .setExpirationTime("7d")
     .sign(secret());
+}
+export async function accountFromToken(token: string): Promise<Account | null> {
+  try {
+    const { payload } = await jwtVerify(token, secret(), {
+      issuer: "folio",
+      audience: "private-app",
+      algorithms: ["HS256"],
+    });
+    if (!payload.sub) return null;
+    const user = await getAccount(payload.sub);
+    return user?.status === "active" && payload.version === user.session_version ? user : null;
+  } catch {
+    return null;
+  }
+}
+export async function authenticatedAccount() {
+  const token = (await cookies()).get("folio_session")?.value;
+  return token ? accountFromToken(token) : null;
+}
+export async function isAuthenticated() {
+  return !!(await authenticatedAccount());
+}
+export async function requireAuth() {
+  const user = await authenticatedAccount();
+  if (!user) throw new AppError("Please sign in again.", 401);
+  return user;
+}
+export async function withAuth<T>(fn: (user: Account) => Promise<T>): Promise<T> {
+  const user = await requireAuth();
+  return withUser(user.id, () => fn(user));
+}
+export async function setSession(user?: Account) {
+  const account = user || (await requireAuth());
+  const token = await createSessionToken(account);
   (await cookies()).set("folio_session", token, {
     httpOnly: true,
-    // Google's top-level callback and its redirects must retain this session.
-    // State-changing API requests still require assertSameOrigin().
     sameSite: "lax",
     secure: appUrl().startsWith("https:"),
     path: "/",
@@ -112,40 +129,37 @@ export function assertSetupToken(value: unknown) {
   )
     throw new AppError("Enter the workspace setup token supplied by the owner.", 403);
 }
-export async function hasOwner() {
-  return !!(await get("owner", "main"));
-}
+export const hasOwner = hasAccounts;
 export async function setPassword(password: string) {
-  if (password.length < 12 || password.length > 256)
-    throw new AppError("Use a password between 12 and 256 characters.");
-  await transaction(async () => {
-    if (await hasOwner()) throw new AppError("Your account is already set up.", 409);
-    const salt = randomBytes(16).toString("hex");
-    await put("owner", {
-      id: "main",
-      salt,
-      hash: scryptSync(password, salt, 64).toString("hex"),
-      createdAt: now(),
-    });
-  });
+  return createFirstAdmin("Original owner", null, password);
 }
 export async function verifyPassword(password: string) {
-  const owner = await get<{
-    salt: string;
-    hash: string;
-  }>("owner", "main");
-  if (!owner || password.length > 256) return false;
-  return timingSafeEqual(scryptSync(password, owner.salt, 64), Buffer.from(owner.hash, "hex"));
+  try {
+    return (await authenticate("", password)).id === LEGACY_USER_ID;
+  } catch {
+    return false;
+  }
 }
-export async function checkLoginRate() {
+export async function checkLoginRate(key = "login") {
   await transaction(async () => {
-    const value = await get<{ count: number; until: number }>("rate", "login");
-    if (value && value.until > Date.now() && value.count >= 10)
+    const rateKey = privateHash(key);
+    const value = (
+      await query<{ count: number; until_at: string }>(
+        "SELECT count,until_at FROM folio_login_rates WHERE key=$1",
+        [rateKey],
+      )
+    ).rows[0];
+    if (value && Number(value.until_at) > Date.now() && value.count >= 10)
       throw new AppError("Too many attempts. Try again in 15 minutes.", 429);
-    await put("rate", {
-      id: "login",
-      count: value && value.until > Date.now() ? value.count + 1 : 1,
-      until: value && value.until > Date.now() ? value.until : Date.now() + 900000,
-    });
+    await query(
+      `INSERT INTO folio_login_rates(key,count,until_at) VALUES($1,$2,$3)
+      ON CONFLICT(key) DO UPDATE SET count=EXCLUDED.count,until_at=EXCLUDED.until_at`,
+      [
+        rateKey,
+        value && Number(value.until_at) > Date.now() ? value.count + 1 : 1,
+        value && Number(value.until_at) > Date.now() ? Number(value.until_at) : Date.now() + 900000,
+      ],
+    );
+    await query("DELETE FROM folio_login_rates WHERE until_at<$1", [Date.now() - 86400000]);
   });
 }

@@ -1,3 +1,5 @@
+import { assertStorageAvailable, assertAccountAvailable } from "./account-limits";
+import { userId } from "./db";
 import { parse, CsvError } from "csv-parse";
 import type { Readable } from "node:stream";
 import { z } from "zod";
@@ -57,7 +59,10 @@ export async function startCsvImport(input: unknown) {
     cleanedAt: null,
   };
   const uploadUrl = await csvUploadUrl(value.id, value.size);
-  await put("csv-import", value);
+  await transaction(async () => {
+    await assertStorageAvailable(value.size);
+    await put("csv-import", value);
+  });
   return { import: publicImport(value), uploadUrl };
 }
 
@@ -126,12 +131,13 @@ export async function retryCsvImport(importId: string) {
 }
 
 async function claimImport(): Promise<StoredImport | null> {
+  await assertAccountAvailable();
   return transaction(async () => {
     const result = await query<{ data: StoredImport }>(
-      `SELECT data FROM folio_records WHERE kind='csv-import' AND
+      `SELECT data FROM folio_records WHERE user_id=$2 AND kind='csv-import' AND
        (data->>'status'='queued' OR (data->>'status'='processing' AND (data->>'leaseUntil')::bigint < $1))
        ORDER BY sequence LIMIT 1`,
-      [Date.now()],
+      [Date.now(), userId()],
     );
     if (!result.rows.length) return null;
     const value: StoredImport = {
@@ -298,12 +304,13 @@ export async function runCsvImports(budgetMs = 200000) {
 
 export async function cleanupCsvImports() {
   const result = await query<{ data: StoredImport }>(
-    `SELECT data FROM folio_records WHERE kind='csv-import' AND data->>'cleanedAt' IS NULL
+    `SELECT data FROM folio_records WHERE user_id=$3 AND kind='csv-import' AND data->>'cleanedAt' IS NULL
       AND ((data->>'status'='completed' AND data->>'updatedAt'<$1)
         OR (data->>'status' IN ('uploading','failed') AND data->>'updatedAt'<$2)) LIMIT 20`,
     [
       new Date(Date.now() - 3600000).toISOString(),
       new Date(Date.now() - 7 * 86400000).toISOString(),
+      userId(),
     ],
   );
   for (const { data: value } of result.rows) {

@@ -1,3 +1,5 @@
+import { resumeAction } from "./resume-actions";
+import { currentAccount } from "./accounts";
 import { z } from "zod";
 import {
   all,
@@ -12,6 +14,7 @@ import {
   tasks,
   transaction,
   query,
+  userId,
   recent,
 } from "./db";
 import { AppError } from "./security";
@@ -22,6 +25,8 @@ import {
   jobTitleSchema,
   profileSchema,
   settingsSchema,
+  writingOptionsSchema,
+  writingInstructionsSchema,
 } from "./validation";
 import { analyzeJob, exclusive, extractProfile, polishEmail, writeEmail } from "./ai";
 import {
@@ -36,33 +41,71 @@ import {
 import { inferBoard } from "./jobs";
 import { matchJob } from "./matching";
 import { localEmail } from "./local-email";
+import { careerAction, careerAtomicActions } from "./career-actions";
+import { builtinTemplates } from "./email-templates";
+import { selectedResume, type ResumeFile } from "./files";
+import type { EmailTemplate, SavedSearch } from "./types";
+import {
+  defaultWritingInstructions,
+  defaultWritingOptions,
+  emailTones,
+  writingOptionsFor,
+  type WritingOptions,
+} from "./email-writing";
 import type { AppState, Company, Draft, Job, Usage } from "./types";
 export async function state(): Promise<AppState> {
   const conn = await connection();
   const user = await profile();
-  const jobs = await recent<Job>("job", 2000);
+  const jobs = await all<Job>("job");
   const drafts = await all<Draft>("draft");
   const companyIds = [...new Set([...jobs, ...drafts].map((item) => item.companyId))];
   const companies = await query<{ data: Company }>(
-    `SELECT data FROM folio_records WHERE kind='company' AND
-     (id=ANY($1::text[]) OR id IN (SELECT id FROM folio_records WHERE kind='company' ORDER BY sequence DESC LIMIT 100))
+    `SELECT data FROM folio_records WHERE user_id=$2 AND kind='company' AND
+     (id=ANY($1::text[]) OR id IN (SELECT id FROM folio_records WHERE user_id=$2 AND kind='company' ORDER BY sequence DESC LIMIT 100))
      ORDER BY sequence DESC`,
-    [companyIds],
+    [companyIds, userId()],
   );
   const companyCount = await query<{ count: number }>(
-    "SELECT count(*)::int AS count FROM folio_records WHERE kind='company'",
+    "SELECT count(*)::int AS count FROM folio_records WHERE kind='company' AND user_id=$1",
+    [userId()],
   );
   return {
+    account: (await currentAccount()) ?? undefined,
+    templates: [...(await all<EmailTemplate>("template")), ...builtinTemplates],
+    searches: await all<SavedSearch>("search"),
+    resumes: (await all<ResumeFile>("file")).map(
+      ({ id, name, label, targetRole, createdAt, size, version, previousId }) => ({
+        id,
+        name,
+        label,
+        targetRole,
+        createdAt,
+        size,
+        version,
+        previousId,
+      }),
+    ),
     profile: user,
     companies: companies.rows.map((row) => row.data),
     companyCount: companyCount.rows[0].count,
-    jobs: jobs.map((job) => ({
-      ...job,
-      match:
-        job.match?.method === "ai" && job.match.profileUpdatedAt === user.updatedAt
-          ? job.match
-          : matchJob(job, user),
-    })),
+    jobs: jobs.map((job) => {
+      const localMatch = matchJob(job, user);
+      return {
+        ...job,
+        match:
+          job.match?.method === "ai" &&
+          job.match.profileUpdatedAt === user.updatedAt &&
+          (job.match.resumeId || "") ===
+            (job.application?.resumeId || (user.defaultResumeId ?? user.resumeId))
+            ? {
+                ...job.match,
+                checks: localMatch?.checks,
+                recommendation: localMatch?.recommendation,
+                skillScore: localMatch?.skillScore,
+              }
+            : localMatch,
+      };
+    }),
     drafts,
     settings: await settings(),
     activity: await recent<AppState["activity"][number]>("activity", 40),
@@ -101,9 +144,38 @@ function editable(draft: Draft) {
       409,
     );
 }
+function checkTemplate(draft: Draft, options: WritingOptions) {
+  if ((options.template === "followup") !== !!draft.followUpOf)
+    throw new AppError(
+      "Use Application Follow-Up only for follow-ups prepared from a sent application.",
+    );
+}
+async function originalForFollowup(draft: Draft) {
+  if (!draft.followUpOf) return undefined;
+  const original = await get<Draft>("draft", draft.followUpOf);
+  if (
+    !original ||
+    original.kind === "direct" ||
+    original.followUpOf ||
+    original.status !== "sent" ||
+    !original.sentAt ||
+    original.replyStatus !== "none" ||
+    original.jobId !== draft.jobId ||
+    original.companyId !== draft.companyId
+  )
+    throw new AppError("These follow-ups require a sent application with no reply or bounce.");
+  if (Date.now() - Date.parse(original.sentAt) < (await settings()).followUpDays * 86400000)
+    throw new AppError("The follow-up reminder is not due yet.");
+  return original;
+}
 async function newDraft(job?: Job, company?: Company): Promise<Draft> {
   if (job) jobTitleSchema.parse(job.title);
   const p = await profile();
+  const defaultId = p.defaultResumeId ?? p.resumeId;
+  const attachment =
+    job && (job.application?.resumeId || defaultId)
+      ? await selectedResume(true, job.application?.resumeId || defaultId, defaultId)
+      : { resumeId: "", resumeName: "" };
   return {
     id: id(),
     kind: job ? "application" : "direct",
@@ -112,11 +184,12 @@ async function newDraft(job?: Job, company?: Company): Promise<Draft> {
     to: company?.email || "",
     subject: job ? `Application for ${job.title}${p.name ? ` — ${p.name}` : ""}` : "",
     body: "",
-    resumeId: job ? p.resumeId : "",
-    resumeName: job ? p.resumeName : "",
+    ...attachment,
     evidence: [],
     reviewNotes: [],
     model: "Manual",
+    writingOptions: defaultWritingOptions(p),
+    writingInstructions: job ? defaultWritingInstructions : "",
     status: "draft",
     version: 1,
     approvedHash: null,
@@ -137,6 +210,7 @@ async function newDraft(job?: Job, company?: Company): Promise<Draft> {
 }
 export async function action(actionName: string, input: unknown) {
   const atomic = [
+    ...careerAtomicActions,
     "profile.save",
     "company.save",
     "company.contacts",
@@ -154,9 +228,23 @@ export async function action(actionName: string, input: unknown) {
     ? transaction(() => performAction(actionName, input))
     : performAction(actionName, input);
 }
-async function performAction(actionName: string, input: unknown) {
+async function performAction(
+  actionName: string,
+  input: unknown,
+): Promise<{
+  message?: string;
+  draftId?: string;
+  jobId?: string;
+  preview?: import("./types").JobImportPreview;
+  suggestion?: import("./types").EnglishSuggestion;
+  contacts?: { email: string; source: string; context: string }[];
+}> {
   const p = z.record(z.string(), z.unknown()).parse(input || {});
   const itemId = () => z.string().uuid().parse(p.id);
+  const resumeResult = await resumeAction(actionName, p);
+  if (resumeResult) return resumeResult;
+  const careerResult = await careerAction(actionName, p);
+  if (careerResult) return careerResult;
   switch (actionName) {
     case "profile.save": {
       const parsed = profileSchema.parse(p);
@@ -279,7 +367,28 @@ async function performAction(actionName: string, input: unknown) {
       const applicationStatus = z
         .enum(["not_submitted", "submitted", "interview", "offer", "rejected", "withdrawn"])
         .parse(p.status);
-      await put("job", { ...job, applicationStatus });
+      await put("job", {
+        ...job,
+        applicationStatus,
+        application: {
+          submittedAt: "",
+          recruiterName: "",
+          recruiterEmail: "",
+          notes: "",
+          interviewAt: "",
+          nextAction: "",
+          reminderAt: "",
+          resumeId: "",
+          ...job.application,
+          ...(applicationStatus === "submitted" && !job.application?.submittedAt
+            ? { submittedAt: now() }
+            : {}),
+          history:
+            applicationStatus === job.applicationStatus
+              ? job.application?.history || []
+              : [...(job.application?.history || []), { status: applicationStatus, at: now() }],
+        },
+      });
       await activity(
         "Application updated",
         `${job.title} · ${applicationStatus.replaceAll("_", " ")}`,
@@ -320,19 +429,38 @@ async function performAction(actionName: string, input: unknown) {
       editable(draft);
       if (draft.kind === "direct")
         throw new AppError("Write your direct email, then use Improve English to edit it.");
-      if (draft.followUpOf)
-        throw new AppError(
-          "Edit the follow-up directly; application generation is for first emails.",
-        );
       return exclusive(`draft:${draft.id}`, async () => {
         const job = await requireJob(draft.jobId);
         const company = (await get<Company>("company", draft.companyId))!;
-        const before = (await profile()).updatedAt;
+        const user = await profile();
+        const before = user.updatedAt;
         const version = z.number().int().parse(p.version);
         if (version !== draft.version)
           throw new AppError("The draft changed in another tab. Reload before generating.", 409);
-        const style = z.string().trim().max(1000).optional().parse(p.style);
-        const result = await writeEmail(job, company, style, draft.body, !!draft.resumeId);
+        const style = writingInstructionsSchema.parse(
+          p.style ?? draft.writingInstructions ?? defaultWritingInstructions,
+        );
+        const options = writingOptionsSchema.parse(
+          p.writingOptions ?? writingOptionsFor(draft, user),
+        );
+        checkTemplate(draft, options);
+        const original = await originalForFollowup(draft);
+        const attachment = await selectedResume(
+          z.boolean().parse(p.attachResume ?? !!draft.resumeId),
+          z.string().optional().parse(p.resumeId),
+          draft.resumeId || (user.defaultResumeId ?? user.resumeId),
+        );
+        const attach = !!attachment.resumeId;
+        const result = await writeEmail(
+          job,
+          company,
+          style,
+          draft.body,
+          attach,
+          options,
+          original,
+          attachment.resumeId,
+        );
         const latest = await requireDraft(draft.id);
         if (
           (await profile()).updatedAt !== before ||
@@ -343,7 +471,7 @@ async function performAction(actionName: string, input: unknown) {
             "The inputs changed while generating. Try again with the latest version.",
             409,
           );
-        const user = await profile();
+        await originalForFollowup(draft);
         await put("draft", {
           ...latest,
           subject: result.value.subject,
@@ -352,8 +480,8 @@ async function performAction(actionName: string, input: unknown) {
           reviewNotes: result.value.reviewNotes,
           model: result.model,
           writingInstructions: style || "",
-          resumeId: draft.resumeId ? user.resumeId : "",
-          resumeName: draft.resumeId ? user.resumeName : "",
+          writingOptions: options,
+          ...attachment,
           status: "draft",
           version: latest.version + 1,
           approvedHash: null,
@@ -382,7 +510,10 @@ async function performAction(actionName: string, input: unknown) {
             "The draft changed in another tab. Reload before improving the English.",
             409,
           );
-        const suggestion = await polishEmail(draft);
+        const tone = z
+          .enum(emailTones)
+          .parse(p.tone ?? draft.writingOptions?.tone ?? "professional");
+        const suggestion = await polishEmail(draft, tone);
         const latest = await requireDraft(draft.id);
         editable(latest);
         if (latest.version !== draft.version)
@@ -406,15 +537,26 @@ async function performAction(actionName: string, input: unknown) {
         if (!company) throw new AppError("Company not found.", 404);
         if (job.status === "closed")
           throw new AppError("This vacancy is closed. Choose an open role.");
-        if (draft.followUpOf)
-          throw new AppError("The local application template is not for follow-ups.");
-        const resumeId = draft.resumeId ? user.resumeId : "";
-        const result = localEmail(job, company, user, !!resumeId);
+        const options = writingOptionsSchema.parse(
+          p.writingOptions ?? writingOptionsFor(draft, user),
+        );
+        checkTemplate(draft, options);
+        const original = await originalForFollowup(draft);
+        const attachment = await selectedResume(
+          z.boolean().parse(p.attachResume ?? !!draft.resumeId),
+          z.string().optional().parse(p.resumeId),
+          draft.resumeId || (user.defaultResumeId ?? user.resumeId),
+        );
+        const resumeId = attachment.resumeId;
+        const result = localEmail(job, company, user, !!resumeId, options, original);
         await put("draft", {
           ...draft,
           ...result,
-          resumeId,
-          resumeName: resumeId ? user.resumeName : "",
+          writingOptions: options,
+          writingInstructions: writingInstructionsSchema.parse(
+            p.style ?? draft.writingInstructions ?? defaultWritingInstructions,
+          ),
+          ...attachment,
           model: "Local template",
           status: "draft",
           version: draft.version + 1,
@@ -437,11 +579,22 @@ async function performAction(actionName: string, input: unknown) {
         if (parsed.version !== draft.version)
           throw new AppError("The draft changed in another tab. Reload before editing.", 409);
         const user = await profile();
+        const attachment = await selectedResume(
+          parsed.attachResume,
+          parsed.resumeId,
+          draft.resumeId || (user.defaultResumeId ?? user.resumeId),
+        );
+        if (parsed.writingOptions && draft.kind !== "direct")
+          checkTemplate(draft, parsed.writingOptions);
         await put("draft", {
           ...draft,
           to: parsed.to,
           subject: parsed.subject,
           body: parsed.body,
+          ...(parsed.writingOptions ? { writingOptions: parsed.writingOptions } : {}),
+          ...(parsed.writingInstructions !== undefined
+            ? { writingInstructions: parsed.writingInstructions }
+            : {}),
           ...(parsed.body !== draft.body ||
           parsed.subject !== draft.subject ||
           draft.profileUpdatedAt !== user.updatedAt
@@ -455,8 +608,7 @@ async function performAction(actionName: string, input: unknown) {
                 model: "Manual",
               }
             : {}),
-          resumeId: parsed.attachResume ? user.resumeId : "",
-          resumeName: parsed.attachResume ? user.resumeName : "",
+          ...attachment,
           version: draft.version + 1,
           status: "draft",
           approvedHash: null,
@@ -499,11 +651,14 @@ async function performAction(actionName: string, input: unknown) {
       const job = await requireJob(original.jobId),
         company = (await get<Company>("company", job.companyId))!;
       const user = await profile();
+      const writingOptions = defaultWritingOptions(user, true);
+      const result = localEmail(job, company, user, false, writingOptions, original);
       const draft = {
         ...(await newDraft(job, company)),
         to: original.to,
-        subject: `Re: ${original.subject}`,
-        body: `Hi Hiring Team,\n\nI wanted to follow up on my email about the ${job.title} role. I’m still interested and would be happy to share any additional information that would be useful.\n\nThanks for your time,\n${user.signature || user.name}`,
+        ...result,
+        writingOptions,
+        model: "Local template",
         resumeId: "",
         resumeName: "",
         followUpOf: original.id,
@@ -511,9 +666,18 @@ async function performAction(actionName: string, input: unknown) {
       await put("draft", draft);
       return { message: "Follow-up prepared for review.", draftId: draft.id };
     }
-    case "settings.save":
-      await put("settings", { ...(await settings()), ...settingsSchema.parse(p) });
+    case "settings.save": {
+      const parsed = settingsSchema.parse(p);
+      const account = await currentAccount();
+      if (
+        account &&
+        (parsed.dailySendLimit > account.limits.dailySendLimit ||
+          parsed.monthlyAiBudget > account.limits.monthlyAiBudget)
+      )
+        throw new AppError("Choose limits within the allowances set by your administrator.");
+      await put("settings", { ...(await settings()), ...parsed });
       return { message: "Settings saved." };
+    }
     case "gmail.disconnect":
       await disconnectGmail();
       return { message: "Gmail disconnected." };

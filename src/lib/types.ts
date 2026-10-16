@@ -1,3 +1,6 @@
+import type { Account } from "./account-types";
+import type { WritingOptions } from "./email-writing";
+
 export interface Profile {
   id: string;
   name: string;
@@ -16,10 +19,100 @@ export interface Profile {
   signature: string;
   tone: "warm" | "concise" | "formal";
   resumeText: string;
+  defaultResumeId?: string;
   resumeId: string;
   resumeName: string;
   confirmed: boolean;
   updatedAt: string;
+  preferences?: JobPreferences;
+}
+export interface JobPreferences {
+  experienceYears: number | null;
+  seniority: string;
+  workCountries: string[];
+  employmentType: string;
+  workplace: string;
+  salaryMin: number | null;
+  salaryCurrency: string;
+}
+export const defaultPreferences: JobPreferences = {
+  experienceYears: null,
+  seniority: "",
+  workCountries: [],
+  employmentType: "",
+  workplace: "",
+  salaryMin: null,
+  salaryCurrency: "INR",
+};
+export interface JobRequirements {
+  experienceMin: number | null;
+  seniority: string;
+  eligibleCountries: string[];
+  employmentType: string;
+  workplace: string;
+  salaryMin: number | null;
+  salaryMax: number | null;
+  salaryCurrency: string;
+  salaryPeriod: string;
+  evidence: string[];
+}
+export interface FitCheck {
+  label: string;
+  status: "supported" | "gap" | "unknown";
+  detail: string;
+}
+export interface ApplicationDetails {
+  resumeName?: string;
+  resumeVersion?: number;
+  submittedAt: string;
+  recruiterName: string;
+  recruiterEmail: string;
+  notes: string;
+  interviewAt: string;
+  nextAction: string;
+  reminderAt: string;
+  resumeId: string;
+  history: { status: Job["applicationStatus"]; at: string }[];
+}
+export interface ResumeVersion {
+  size?: number;
+  version?: number;
+  previousId?: string;
+  id: string;
+  name: string;
+  label?: string;
+  targetRole?: string;
+  createdAt: string;
+}
+export interface EmailTemplate {
+  id: string;
+  name: string;
+  subject: string;
+  body: string;
+  purpose: "application" | "inquiry" | "referral" | "followup";
+  updatedAt: string;
+  builtin?: boolean;
+}
+export interface SavedSearch {
+  id: string;
+  name: string;
+  query: string;
+  location: string;
+  workplace: string;
+  employmentType: string;
+  maxAgeDays: number;
+  updatedAt: string;
+}
+export interface JobImportPreview {
+  companyName: string;
+  title: string;
+  location: string;
+  description: string;
+  url: string;
+  applyUrl: string;
+  remote: boolean;
+  salary: string;
+  requirements: JobRequirements;
 }
 export type Source = "ashby" | "greenhouse" | "lever" | "manual";
 export interface Company {
@@ -47,6 +140,10 @@ export interface Match {
   unknowns: string[];
   method: "rules" | "ai";
   profileUpdatedAt: string;
+  resumeId?: string;
+  recommendation?: "good" | "stretch" | "review" | "poor";
+  checks?: FitCheck[];
+  skillScore?: number;
 }
 export interface Job {
   id: string;
@@ -68,6 +165,8 @@ export interface Job {
   createdAt: string;
   updatedAt: string;
   source: Source;
+  requirements?: JobRequirements;
+  application?: ApplicationDetails;
 }
 export type DraftStatus = "draft" | "gmail_draft" | "approved" | "sending" | "sent" | "uncertain";
 export interface Draft {
@@ -85,6 +184,7 @@ export interface Draft {
   reviewNotes: string[];
   model: string;
   writingInstructions?: string;
+  writingOptions?: WritingOptions;
   status: DraftStatus;
   version: number;
   approvedHash: string | null;
@@ -157,6 +257,7 @@ export interface Connections {
   workerLastSeen: string | null;
 }
 export interface AppState {
+  account?: Account;
   profile: Profile;
   companies: Company[];
   companyCount: number;
@@ -167,6 +268,9 @@ export interface AppState {
   usage: Usage[];
   tasks: Task[];
   connections: Connections;
+  templates?: EmailTemplate[];
+  resumes?: ResumeVersion[];
+  searches?: SavedSearch[];
 }
 export const emptyProfile: Profile = {
   id: "main",

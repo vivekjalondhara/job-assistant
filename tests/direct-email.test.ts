@@ -1,4 +1,4 @@
-import { after, beforeEach, test } from "node:test";
+import { after, beforeEach, test } from "./scoped-test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -89,6 +89,189 @@ async function approve(draft: Draft) {
   await saveGmailDraft(draft.id);
   await action("draft.approve", { id: draft.id, version: draft.version, reviewed: true });
 }
+
+function sendPayload(draft: Draft) {
+  return {
+    id: draft.id,
+    version: draft.version,
+    to: draft.to,
+    subject: draft.subject,
+    body: draft.body,
+    attachResume: false,
+    resumeId: "",
+    profileUpdatedAt: draft.profileUpdatedAt,
+    senderEmail: "owner@example.com",
+    reviewed: true,
+  };
+}
+
+test("one Send email action sends the current editor without separate save or approval actions", async () => {
+  const created = await action("draft.direct", {});
+  assert.ok(created && "draftId" in created && created.draftId);
+  const draft = await readDraft(created.draftId);
+  const payload = {
+    ...sendPayload(draft),
+    to: "new-recipient@example.com",
+    subject: "A new message",
+    body: "Hello, this is the message I just wrote in the editor. Thank you for reading it.",
+  };
+  await action("draft.sendDirect", payload);
+  const sent = await readDraft(draft.id);
+  assert.equal(sent.status, "sent");
+  assert.equal(sent.body, payload.body);
+  assert.equal(sent.to, payload.to);
+  assert.ok(sent.approvedAt);
+  assert.equal(sent.gmailAccountEmail, "owner@example.com");
+  assert.equal(sends, 1);
+  const mime = Buffer.from([...remoteDrafts.values()][0], "base64url").toString();
+  assert.match(mime, /To: new-recipient@example.com/);
+  assert.match(mime, /Subject: A new message/);
+  assert.equal((await store.all("job")).length, 0);
+  assert.equal((await store.all("company")).length, 0);
+  await assert.rejects(action("draft.sendDirect", payload), /already sent/);
+  assert.equal(sends, 1);
+});
+
+test("one-step sending rejects stale editors, missing consent, invalid content, and wrong senders before Gmail", async () => {
+  const draft = await compose();
+  const payload = sendPayload(draft);
+  for (const changed of [
+    { version: 0 },
+    { reviewed: false },
+    { to: "invalid" },
+    { to: "" },
+    { subject: "Hello\r\nBcc: other@example.com" },
+    { body: "Too short" },
+    { senderEmail: "previous-account@example.com" },
+    { body: "Please find my résumé attached for your review." },
+  ])
+    await assert.rejects(action("draft.sendDirect", { ...payload, ...changed }));
+  await store.put("settings", { ...(await store.settings()), automationPaused: true });
+  await assert.rejects(action("draft.sendDirect", payload), /Sending is paused/);
+  assert.deepEqual(await readDraft(draft.id), draft);
+  assert.equal(remoteDrafts.size, 0);
+  assert.equal(sends, 0);
+});
+
+test("one-step sending cannot turn an application into a direct email", async () => {
+  const direct = await compose();
+  const application = {
+    ...direct,
+    kind: "application" as const,
+    jobId: "job",
+    companyId: "company",
+  };
+  await store.put("draft", application);
+  await assert.rejects(
+    action("draft.sendDirect", { ...sendPayload(application), kind: "direct" }),
+    /application review steps/,
+  );
+  assert.deepEqual(await readDraft(direct.id), application);
+  assert.equal(remoteDrafts.size, 0);
+});
+
+test("one-step sending locks the entire save, approval, and send sequence against edits and double clicks", async () => {
+  const draft = await compose();
+  const mockFetch = global.fetch;
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const saving = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  global.fetch = async (input, init) => {
+    if (String(input).endsWith("/drafts") && init?.method === "POST") {
+      entered();
+      await gate;
+    }
+    return mockFetch(input, init);
+  };
+  const sending = action("draft.sendDirect", sendPayload(draft));
+  await saving;
+  try {
+    await assert.rejects(action("draft.sendDirect", sendPayload(draft)), /already running/);
+    await assert.rejects(
+      action("draft.save", { ...sendPayload(draft), body: "Changed while sending this email." }),
+      /already running/,
+    );
+  } finally {
+    release();
+    await sending;
+  }
+  assert.equal(sends, 1);
+  assert.equal((await readDraft(draft.id)).body, draft.body);
+});
+
+test("one-step sending retains duplicate checks and uncertain-send protection", async () => {
+  const first = await compose();
+  failSend = true;
+  await assert.rejects(action("draft.sendDirect", sendPayload(first)), /could not be confirmed/);
+  const uncertain = await readDraft(first.id);
+  assert.equal(uncertain.status, "uncertain");
+  await assert.rejects(
+    action("draft.sendDirect", sendPayload(uncertain)),
+    /awaiting send verification/,
+  );
+  const duplicate = await compose();
+  await assert.rejects(action("draft.sendDirect", sendPayload(duplicate)), /same email/);
+  await store.put("settings", { ...(await store.settings()), dailySendLimit: 1 });
+  const different = await compose("someone-else@example.com");
+  await assert.rejects(action("draft.sendDirect", sendPayload(different)), /sending allowance/);
+  assert.equal(sends, 1);
+});
+
+test("one-step sending rechecks Gmail content after recording approval", async () => {
+  const draft = await compose();
+  const mockFetch = global.fetch;
+  let reads = 0;
+  global.fetch = async (input, init) => {
+    if (String(input).includes("format=raw") && ++reads === 3) tamper = true;
+    return mockFetch(input, init);
+  };
+  await assert.rejects(action("draft.sendDirect", sendPayload(draft)), /Gmail draft changed/);
+  assert.equal(sends, 0);
+  assert.equal((await readDraft(draft.id)).approvedHash, null);
+});
+
+test("one-step sending requires the exact résumé selection and detects a mailbox switch mid-send", async () => {
+  const draft = await compose();
+  await store.put("profile", {
+    ...(await store.profile()),
+    resumeId: "new-resume",
+    updatedAt: "2026-10-15T13:00:00Z",
+  });
+  await assert.rejects(
+    action("draft.sendDirect", {
+      ...sendPayload(draft),
+      attachResume: true,
+      resumeId: "old-resume",
+    }),
+    /Review the attachment/,
+  );
+  assert.equal(remoteDrafts.size, 0);
+  const mockFetch = global.fetch;
+  global.fetch = async (input, init) => {
+    const result = await mockFetch(input, init);
+    if (String(input).endsWith("/drafts") && init?.method === "POST") {
+      process.env.GOOGLE_ALLOWED_EMAIL = "owner@example.com,second@example.com";
+      await store.put("secret", {
+        id: "gmail",
+        value: encrypt({
+          email: "second@example.com",
+          accessToken: "second-access",
+          refreshToken: "second-refresh",
+          expiresAt: Date.now() + 3600000,
+          needsReconnect: false,
+        }),
+      });
+    }
+    return result;
+  };
+  await assert.rejects(action("draft.sendDirect", sendPayload(draft)), /Gmail account/);
+  assert.equal(sends, 0);
+});
 
 test("direct email can be composed, reviewed, and sent without a company, job, or profile", async () => {
   const draft = await compose();
@@ -284,6 +467,9 @@ test("the direct composer shows To and New email without company or vacancy requ
   assert.match(html, /recruiter@example.com/);
   assert.match(html, /Direct email/);
   assert.match(html, /Improve English/);
+  assert.match(html, /Save draft/);
+  assert.match(html, /Send email/);
+  assert.doesNotMatch(html, /Save to Gmail|Approve this draft/);
   assert.doesNotMatch(
     html,
     /THE OPPORTUNITY|Confirm this recruitment address|vacancy is closed|Write from my profile/,

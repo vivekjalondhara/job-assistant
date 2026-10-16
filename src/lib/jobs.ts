@@ -1,7 +1,8 @@
 import { all, get, put, id, now, profile, activity, transaction } from "./db";
 import { AppError } from "./security";
 import { matchJob } from "./matching";
-import type { Company, Job, Source } from "./types";
+import type { Company, Job, Source, JobRequirements } from "./types";
+import { extractRequirements, salaryFacts } from "./job-preferences";
 export function inferBoard(value: string): {
   source: Source;
   board: string;
@@ -73,6 +74,9 @@ type Listing = {
   applyUrl: string;
   publishedAt: string | null;
   salary: string;
+  workplace?: string;
+  employmentType?: string;
+  compensation?: Partial<JobRequirements>;
 };
 export async function scanCompany(
   companyId: string,
@@ -103,7 +107,7 @@ export async function scanCompany(
       listings = data.jobs
         .filter((j: { isListed?: boolean }) => j.isListed !== false)
         .map((j: Record<string, any>) => ({
-          sourceId: String(j.jobUrl).split("/").filter(Boolean).pop()!,
+          sourceId: typeof j.jobUrl === "string" ? j.jobUrl.split("/").filter(Boolean).pop()! : "",
           title: j.title,
           description: j.descriptionPlain || stripHtml(j.descriptionHtml || ""),
           location: j.location || "Not stated",
@@ -112,6 +116,24 @@ export async function scanCompany(
           applyUrl: j.applyUrl || j.jobUrl,
           publishedAt: j.publishedAt || null,
           salary: j.compensation?.compensationTierSummary || "",
+          compensation: (() => {
+            const salaries = j.compensation?.summaryComponents?.filter(
+              (c: Record<string, unknown>) => c.compensationType === "Salary",
+            );
+            const s = salaries?.length === 1 ? salaries[0] : {};
+            return salaryFacts(s.minValue, s.maxValue, s.currencyCode, s.interval);
+          })(),
+          workplace: typeof j.workplaceType === "string" ? j.workplaceType.toLowerCase() : "",
+          employmentType:
+            (
+              {
+                FullTime: "full-time",
+                PartTime: "part-time",
+                Intern: "internship",
+                Contract: "contract",
+                Temporary: "temporary",
+              } as Record<string, string>
+            )[j.employmentType] || "",
         }));
     } else if (company.source === "greenhouse") {
       const data = await fetchJson(
@@ -120,7 +142,7 @@ export async function scanCompany(
       if (!Array.isArray(data.jobs))
         throw new AppError("The job feed format changed. Existing jobs were preserved.", 502);
       listings = data.jobs.map((j: Record<string, any>) => ({
-        sourceId: String(j.id),
+        sourceId: typeof j.id === "number" || typeof j.id === "string" ? String(j.id) : "",
         title: j.title,
         description: stripHtml(j.content || ""),
         location: j.location?.name || "Not stated",
@@ -144,7 +166,7 @@ export async function scanCompany(
         if (!Array.isArray(batch)) throw new AppError("The job feed format changed.", 502);
         listings.push(
           ...batch.map((j: Record<string, any>) => ({
-            sourceId: String(j.id),
+            sourceId: typeof j.id === "number" || typeof j.id === "string" ? String(j.id) : "",
             title: j.text,
             description: [
               j.descriptionPlain || stripHtml(j.description || ""),
@@ -155,12 +177,30 @@ export async function scanCompany(
             ].join("\n\n"),
             location: j.categories?.location || "Not stated",
             remote: j.workplaceType === "remote",
+            workplace: j.workplaceType === "on-site" ? "onsite" : j.workplaceType || "",
+            employmentType:
+              typeof j.categories?.commitment === "string"
+                ? (
+                    {
+                      "full-time": "full-time",
+                      "part-time": "part-time",
+                      contract: "contract",
+                      internship: "internship",
+                    } as Record<string, string>
+                  )[j.categories.commitment.toLowerCase()] || ""
+                : "",
             url: j.hostedUrl,
             applyUrl: j.applyUrl || j.hostedUrl,
             publishedAt: null,
             salary: j.salaryRange
               ? `${j.salaryRange.min}–${j.salaryRange.max} ${j.salaryRange.currency} ${j.salaryRange.interval}`
               : "",
+            compensation: salaryFacts(
+              j.salaryRange?.min,
+              j.salaryRange?.max,
+              j.salaryRange?.currency,
+              j.salaryRange?.interval,
+            ),
           })),
         );
         if (batch.length < 100) {
@@ -171,7 +211,17 @@ export async function scanCompany(
       if (!complete)
         throw new AppError("The feed exceeds the scan limit. Existing jobs were preserved.", 502);
     }
-    if (listings.some((j) => !j.sourceId || !j.title || !j.url))
+    if (
+      new Set(listings.map((j) => j.sourceId)).size !== listings.length ||
+      listings.some(
+        (j) =>
+          !j.sourceId ||
+          typeof j.title !== "string" ||
+          !j.title.trim() ||
+          typeof j.url !== "string" ||
+          !/^https:\/\//i.test(j.url),
+      )
+    )
       throw new AppError(
         "The job feed contains incomplete records. Existing jobs were preserved.",
         502,
@@ -192,15 +242,24 @@ export async function scanCompany(
       for (const listing of listings) {
         seen.add(listing.sourceId);
         const prev = existing.find((j) => j.sourceId === listing.sourceId || j.url === listing.url);
+        const requirements = {
+          ...extractRequirements(listing),
+          ...listing.compensation,
+          ...(listing.workplace ? { workplace: listing.workplace } : {}),
+          ...(listing.employmentType ? { employmentType: listing.employmentType } : {}),
+        };
         const changed =
           !prev ||
+          JSON.stringify(prev.requirements) !== JSON.stringify(requirements) ||
           (
             ["title", "description", "location", "remote", "url", "applyUrl", "salary"] as const
           ).some((key) => prev[key] !== listing[key]);
         const job: Job = {
+          ...prev,
           id: prev?.id || id(),
           companyId: company.id,
           ...listing,
+          requirements,
           source: company.source,
           status: prev?.status === "closed" ? "new" : prev?.status || "new",
           applicationStatus: prev?.applicationStatus || "not_submitted",

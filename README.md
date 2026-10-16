@@ -2,7 +2,9 @@
 
 A private application for organizing your job search: confirm your experience, import companies, find supported vacancies, review matches, write tailored emails with OpenRouter, save Gmail drafts, approve and send, and track replies.
 
-Built for one person. Records persist in Neon Postgres; encrypted résumé files persist in a private S3-compatible bucket, including Neon Object Storage. The web app runs on Vercel or locally. OpenRouter and Gmail each require your own credentials.
+Supports admin-managed user accounts with private workspaces and multiple résumés. Records persist in Neon Postgres; encrypted résumé files persist in a private S3-compatible bucket, including Neon Object Storage. The web app runs on Vercel or locally. OpenRouter uses server-managed credentials; each user connects their own Gmail account. See [accounts and résumé setup](MULTI_USER.md).
+
+The workspace also includes a **Today** shortlist, structured job preferences, saved searches, job-link/text import, reusable email templates, selectable résumé versions, and application notes, interview dates and reminders. See [Job search and reusable email workflows](CAREER_UPGRADES.md) for the full workflow and supported import sources.
 
 ## Start the application
 
@@ -18,7 +20,7 @@ npm run build
 npm start
 ```
 
-If `.env` already exists, edit it instead of copying over it. Fill the required database, storage, encryption, setup-token, and cron values shown in `.env.example`. Use `.env` for configuration; remove or rename old override files so Next.js does not load stale values. Open **http://localhost:3210**, enter `APP_SETUP_TOKEN`, and choose your private password (at least 12 characters). Later logins use only the password. Use the origin in `APP_URL` consistently.
+If `.env` already exists, edit it instead of copying over it. Fill the required database, storage, encryption, setup-token, and cron values shown in `.env.example`. Use `.env` for configuration; remove or rename old override files so Next.js does not load stale values. Open **http://localhost:3210**, enter `APP_SETUP_TOKEN`, your name and email, and choose an administrator password (at least 12 characters). Later logins use email and password. Existing owners sign in with their original password and enter an email once to claim it. Use the origin in `APP_URL` consistently.
 
 For development, run `npm run dev`. Local `dev` and `start` launch the web app and worker. The worker reads `.env`. On Vercel, authenticated actions and workspace polling run queued tasks with Next.js `after()`, and a protected cron route starts scheduled checks. Automatic sending is never enabled.
 
@@ -46,13 +48,13 @@ Résumé uploads are limited to **4 MB** to fit Vercel's request limit. CSV impo
 3. **Find vacancies:** enter an official Ashby, Greenhouse, or Lever board URL and run a company check. Other careers sites support manual job entry. Daily scheduled checks can be enabled in Settings.
 4. **Review matches:** keyword scores work locally after profile confirmation. With OpenRouter configured, open a job and request AI analysis for reasons, gaps, and unknowns. Scores rank fit; they are not hiring probabilities.
 5. **Choose a contact:** the company editor can find published email addresses in saved job descriptions. Review their context and purpose, then confirm an appropriate recruitment contact. When no address is available, use the company's application link.
-6. **Prepare an email:** open a job, review **Tailor your application**, and choose **Prepare email**. Use **Write from my profile** without an API key, or **Generate with AI** with optional writing instructions. Review the quoted evidence and **Before you send** checks, then save edits locally. Copy or download the text if you use another email client; attach your résumé separately there. See [PROMPTS.md](PROMPTS.md) for the complete workflow, sample writing instructions, prompt source, and limitations.
+6. **Prepare an email:** open a job, review **Tailor your application**, and choose **Prepare email**. Choose Standard, Short Recruiter, Achievement-Focused, or an eligible Follow-Up template, then set the tone and word target. Use **Write from my profile** without an API key, or **Generate with AI** with the recommended, editable writing instructions. **Improve English** shows the original and revised wording side by side before you apply it. Review the quoted evidence and **Before you send** checks, then save edits locally. Copy or download the text if you use another email client; attach your résumé separately there. See [PROMPTS.md](PROMPTS.md) for the complete workflow, sample writing instructions, prompt source, and limitations.
 7. **Save to Gmail:** once connected, save the reviewed email as a real Gmail draft. The attachment is the selected résumé. Check the review box and approve that exact version. Edits clear approval.
 8. **Send:** click **Send approved email**. The application rechecks the approved draft against Gmail, current profile/job facts, duplicate sends, and your sending allowance. Supported stale vacancy feeds are rechecked before sending. Sending is always an explicit action.
 9. **Track:** view emails and application status separately. Sending an email does not mark an employer's application form as submitted. Mark formal submissions and interviews yourself. Known Gmail application threads are checked for replies and delivery notices.
 10. **Follow up:** after the configured delay, prepare one follow-up for an unanswered email. Review, save, approve, and send it using the same process. A detected reply or bounce blocks a follow-up.
 
-To email someone without adding a company or job, open **Email studio → New email**. Type a recipient in **To**, add a subject, and write your message. A résumé attachment is optional and starts unchecked. Choose **Save edits**, then **Save to Gmail**, review the recipient and message, **Approve this draft**, and **Send approved email**. Direct emails do not require a confirmed profile. **Improve English** is available with OpenRouter; profile-based generation and follow-up reminders remain part of job applications. Direct emails appear in Email studio, including Sent, and their known threads are checked for replies. Sending allowances and duplicate-message protection still apply.
+To email someone without adding a company or job, open **Email studio → New email**. Type a recipient in **To**, add a subject, and write your message. A résumé attachment is optional and starts unchecked. Connect Gmail in Settings, review your message and sender, then click **Send email**. This click approves and sends the exact message in the editor; the app saves it to Gmail and checks it before sending, with no separate save or approval steps. Use **Save draft** to keep working without sending. Direct emails do not require a confirmed profile. **Improve English** is available with OpenRouter; profile-based generation and follow-up reminders remain part of job applications. Direct emails appear in Email studio, including Sent, and their known threads are checked for replies. Sending allowances and duplicate-message protection still apply.
 
 ## Connect OpenRouter
 
@@ -92,13 +94,13 @@ The monthly setting stops new calls once recorded usage reaches the chosen amoun
    GOOGLE_ALLOWED_EMAIL=first@gmail.com,second@gmail.com
    ```
 
-   Replace the example addresses with your accounts. For just one account, use `GOOGLE_ALLOWED_EMAIL=first@gmail.com`. Keep the variable name singular even for multiple addresses. Use commas; spaces and letter case are ignored. Every entry must be a valid full email address. Wildcards and domain-only entries are rejected. The list controls Gmail connections, not the app's password login or separate user workspaces.
+   Replace the example addresses with your accounts. For just one account, use `GOOGLE_ALLOWED_EMAIL=first@gmail.com`. Keep the variable name singular even for multiple addresses. Use commas; spaces and letter case are ignored. Every entry must be a valid full email address. Wildcards and domain-only entries are rejected. The list controls Gmail connections for the original administrator workspace. Invited users authorize their own verified Gmail mailboxes in separate private workspaces. Account creation is controlled by the admin panel.
 
    On Vercel, also set `APP_URL=https://job-assistant-nine.vercel.app`. Paste only the comma-separated addresses in the value field for `GOOGLE_ALLOWED_EMAIL` (without quotes or the variable name).
 
 6. Restart the local app and worker, or **redeploy Vercel after changing environment variables and deploying this code**. Open **Settings → Connect Gmail**, choose either allowed account, and grant both requested Gmail permissions.
 
-To switch accounts, use **Settings → Disconnect Gmail → Connect Gmail**, then select the other account. Only one mailbox is connected at a time. Disconnect removes its saved credentials and attempts to revoke its Google grant; application history remains in this shared personal workspace. Removing an address from the allowed list also blocks further Gmail operations for that account after restarting/redeploying.
+To switch accounts, use **Settings → Disconnect Gmail → Connect Gmail**, then select the other account. Only one mailbox per user is connected at a time. Disconnect removes its saved credentials and attempts to revoke its Google grant; application history remains in that user’s private workspace. Removing an address from the allowed list also blocks further Gmail operations for that account after restarting/redeploying.
 
 Drafts and sent threads record their owning Gmail address. After switching accounts, saving an unsent email creates a new Gmail draft in the connected account, clears approval, and requires review again. The original draft remains in the previous mailbox. Reply checks and follow-ups use only the account that sent the original application. Older drafts without a recorded sender must be saved again before approval; reconnecting or disconnecting an existing connection records its ownership before switching.
 
@@ -119,7 +121,7 @@ The application uses the Gmail API, not SMTP or your Google password. Gmail cred
 - Send through Folio for automatic tracking. Messages sent directly from Gmail are not automatically reconciled. If a send times out, the draft is held as **uncertain** and cannot be retried through the app. Check Gmail Sent manually; this version has no recovery/reconciliation UI for that state.
 - Reply checks inspect metadata in up to 100 known sent application threads per run. Separate-thread responses, some delivery reports, and messages outside those threads can be missed. Automatic acknowledgments are conservatively treated as replies. There is no full inbox AI reader or automatic response sending.
 - Only one follow-up per application is supported. Background jobs discover vacancies and check replies; they never send messages.
-- The app is a single-owner workspace. Neon Postgres and private object storage provide persistence across Vercel instances and deployments. Multi-user tenancy is not implemented.
+- The app supports admin-created users with private workspaces. Workspace records and tasks are scoped to the authenticated user; admins manage accounts and allowances without a private-content browser. Neon Postgres and private object storage provide persistence across Vercel instances and deployments.
 
 ## Files and data
 
